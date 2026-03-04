@@ -1,0 +1,36 @@
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. SAMPLE.
+       AUTHOR. LegacyLens Demo.
+       DATE-WRITTEN. 2025.
+      *
+       ENVIRONMENT DIVISION.
+       INPUT-OUTPUT SECTION.
+       FILE-CONTROL.
+           SELECT CUSTOMER-FILE ASSIGN TO "CUSTOMER.DAT".
+       DATA DIVISION.
+       FILE SECTION.
+       FD  CUSTOMER-FILE.
+       01  CUSTOMER-RECORD.
+           05  CUST-ID           PIC 9(6).
+           05  CUST-NAME         PIC X(40).
+           05  CUST-BALANCE      PIC S9(7)V99.
+       WORKING-STORAGE SECTION.
+       01  WS-EOF               PIC X VALUE 'N'.
+       PROCEDURE DIVISION.
+       MAIN-LOGIC.
+           OPEN INPUT CUSTOMER-FILE
+           PERFORM READ-NEXT UNTIL WS-EOF = 'Y'
+           CLOSE CUSTOMER-FILE
+           STOP RUN.
+       READ-NEXT.
+           READ CUSTOMER-FILE
+             AT END MOVE 'Y' TO WS-EOF
+             NOT AT END PERFORM PROCESS-RECORD
+           END-READ.
+       PROCESS-RECORD.
+           IF CUST-BALANCE > 0
+             PERFORM CALCULATE-INTEREST
+           END-IF.
+       CALCULATE-INTEREST.
+           COMPUTE CUST-BALANCE =
+             CUST-BALANCE * 1.05.

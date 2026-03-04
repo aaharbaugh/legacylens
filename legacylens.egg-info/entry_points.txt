@@ -1,0 +1,2 @@
+[console_scripts]
+legacylens-ingest = backend.ingestion.pipeline:main

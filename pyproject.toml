@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "legacylens"
+version = "0.1.0"
+description = "RAG-powered legacy codebase navigator"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "qdrant-client>=1.7.0",
+    "fastapi>=0.109.0",
+    "uvicorn[standard]>=0.27.0",
+    "google-genai>=1.0.0",
+    "httpx>=0.26.0",
+    "pydantic>=2.5.0",
+    "pydantic-settings>=2.1.0",
+    "python-dotenv>=1.0.0",
+    "rank-bm25>=0.2.2",
+]
+
+[project.optional-dependencies]
+reranker = ["FlagEmbedding>=1.2.0"]
+
+[project.scripts]
+legacylens-ingest = "backend.ingestion.pipeline:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["backend*"]

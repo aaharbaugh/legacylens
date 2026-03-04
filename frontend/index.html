@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LegacyLens Workspace</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/styles/github-dark.min.css" />
+  <link rel="stylesheet" href="/assets/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <h1>LegacyLens Workspace</h1>
+      <p>RAG over legacy COBOL codebases.</p>
+    </div>
+    <div class="session">
+      <span id="session-text">Signed out</span>
+    </div>
+  </header>
+
+  <nav class="tabs">
+    <button class="tab-btn" data-tab="admin">Admin</button>
+    <button class="tab-btn active" data-tab="prompt">Prompt</button>
+  </nav>
+
+  <main class="layout">
+    <section id="tab-admin" class="tab-panel">
+      <div class="tab-content">
+      <h2>Sign In</h2>
+      <label for="admin-token">Admin token</label>
+      <div class="inline">
+        <input id="admin-token" type="password" autocomplete="current-password" />
+        <button id="login-btn" class="primary">Sign in</button>
+      </div>
+      <p id="login-status" class="status"></p>
+
+      <h2>Corpus</h2>
+      <p id="storage-info" class="status muted"></p>
+      <p id="runtime-config" class="status"></p>
+      <div class="inline">
+        <label for="browse-source">Source</label>
+        <select id="browse-source">
+          <option value="all">All</option>
+          <option value="code">Code</option>
+          <option value="docs">Docs</option>
+        </select>
+      </div>
+      <div class="buttons">
+        <button id="refresh-count-btn">Refresh count</button>
+        <button id="load-corpus-btn">Load sample chunks</button>
+      </div>
+      <p id="db-summary" class="status"></p>
+      <pre id="corpus-list" class="list"></pre>
+
+      <h2>Reingest</h2>
+      <label for="code-root">Code root (optional)</label>
+      <input id="code-root" type="text" placeholder="gnucobol-3.2_win" />
+      <label for="code-extensions">Extensions</label>
+      <input id="code-extensions" type="text" placeholder="* (all files) or .cob,.cbl,.c,.h,.md" value="*" />
+      <label for="max-files">Max files (blank = no limit)</label>
+      <input id="max-files" type="number" min="1" placeholder="e.g. 50" />
+      <label for="batch-size">Batch size (chunks per API call)</label>
+      <input id="batch-size" type="number" min="10" max="500" placeholder="100" />
+      <div class="buttons">
+        <button id="reset-btn">Reset DB</button>
+        <button id="reingest-btn" class="primary">Reset + reingest</button>
+      </div>
+      <p id="db-status" class="status"></p>
+      <p id="reingest-status" class="status"></p>
+      </div>
+    </section>
+
+    <section id="tab-prompt" class="tab-panel active">
+      <div class="prompt-layout">
+        <aside class="prompt-history-sidebar">
+          <h3>History</h3>
+          <ul id="prompt-history-list"></ul>
+        </aside>
+        <div class="prompt-main tab-content">
+          <h2>Query</h2>
+          <div class="prompt-area">
+            <label for="query-text" class="prompt-label">Ask about your codebase</label>
+            <textarea id="query-text" rows="4" placeholder="e.g. What does #ifndef __cplusplus do?"></textarea>
+            <div class="prompt-suggestions" aria-label="Tips for better results">
+              <span class="prompt-suggestions-label">Better results:</span>
+              <button type="button" class="prompt-suggestion-bubble" data-insert="What does [file path or keyword] do? (e.g. file.cbl, EVALUATE)">Include file path or keyword</button>
+              <button type="button" class="prompt-suggestion-bubble" data-insert="Explain [paragraph or function name] (e.g. CALCULATE-INTEREST, open_cob_file)">Name a paragraph or function</button>
+            </div>
+            <div class="prompt-actions">
+              <p id="query-status" class="status"></p>
+              <button id="chat-btn" class="primary chat-btn">Chat</button>
+            </div>
+          </div>
+          <div id="chat-answer" class="chat-answer" style="display:none;"></div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/highlight.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/highlightjs-cobol@0.3/dist/cobol.min.js"></script>
+  <script src="/assets/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,23 @@
+# LegacyLens backend – Vector DB, ingestion, API
+# Python 3.10+
+
+# Vector DB
+qdrant-client>=1.7.0
+
+# API
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+
+# Google Gen AI SDK (Vertex AI backend: embeddings + LLM)
+google-genai>=1.0.0
+
+# BM25 for hybrid search
+rank-bm25>=0.2.2
+
+# HTTP & schemas
+httpx>=0.26.0
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+
+# Utilities
+python-dotenv>=1.0.0

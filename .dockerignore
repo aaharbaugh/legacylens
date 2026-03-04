@@ -1,0 +1,35 @@
+# Git and IDE
+.git
+.gitignore
+.venv
+venv
+__pycache__
+*.pyc
+.pytest_cache
+.mypy_cache
+.ruff_cache
+
+# Local data (not needed in container – use Qdrant Cloud in prod)
+.qdrant_data
+embeddings.json
+bm25_index.pkl
+
+# Secrets (inject via env at runtime)
+.env
+*-key.json
+*credentials*.json
+
+# Docs and dev artifacts
+docs/
+*.md
+!README.md
+
+# Sample/source code (ingest separately; not needed to run the API)
+sample_cobol/
+gnucobol-*/
+*.cob
+*.cbl
+
+# Tests
+tests/
+scripts/
