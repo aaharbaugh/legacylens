@@ -48,7 +48,7 @@ class Settings(BaseSettings):
     # Chunking: smaller chunks often embed and retrieve better
     max_paragraph_chunk_lines: int = 45  # cap one "paragraph" chunk
     fallback_chunk_lines: int = 45  # fixed-size fallback window
-    fallback_overlap_lines: int = 10
+    fallback_overlap_lines: int = 0  # 0 = no overlap between adjacent fallback chunks
 
     # Retrieval
     query_top_k: int = 50  # candidates before rerank/fusion (main /query)
@@ -62,6 +62,7 @@ class Settings(BaseSettings):
     use_reranker: bool = False  # cross-encoder rerank (adds ~5-15s; set false for speed)
     reranker_model: str = "cross-encoder/ms-marco-MiniLM-L6-v2"  # fast; or BAAI/bge-reranker-base for quality
     rrf_k: int = 60  # RRF constant
+    bm25_min_score: float = 1e-9  # ignore lexical candidates when BM25 score is effectively zero
 
     # Embedding prefix (improves retrieval for similar snippets)
     embed_metadata_prefix: bool = True

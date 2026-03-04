@@ -12,8 +12,6 @@ from backend.config import settings
 
 logger = logging.getLogger(__name__)
 
-BM25_INDEX_PATH = Path("bm25_index.pkl")
-
 
 def _tokenize(text: str) -> list[str]:
     """
@@ -28,7 +26,7 @@ def _tokenize(text: str) -> list[str]:
 
 def build_index(chunks: list[dict[str, Any]]) -> "BM25Index | None":
     """
-    Build BM25 index from chunks. Each chunk must have 'id' and 'search_text' or 'code_snippet'.
+    Build BM25 index from chunks. Each chunk must have 'id' and 'code_snippet'.
     Stores payload map so BM25-only hits have metadata without Qdrant retrieve.
     Returns the index or None if chunks empty.
     """
@@ -46,7 +44,7 @@ def build_index(chunks: list[dict[str, Any]]) -> "BM25Index | None":
         pid = c.get("id")
         if not pid:
             continue
-        text = c.get("search_text") or c.get("code_snippet") or ""
+        text = _build_retrieval_text(c, include_prefix=settings.embed_metadata_prefix)
         tokens = _tokenize(text)
         if not tokens:
             continue
@@ -57,11 +55,13 @@ def build_index(chunks: list[dict[str, Any]]) -> "BM25Index | None":
             "start_line": c.get("start_line", 0),
             "end_line": c.get("end_line", 0),
             "code_snippet": (c.get("code_snippet") or "")[:65535],
+            "metadata_prefix": c.get("metadata_prefix"),
             "language": c.get("language", "COBOL"),
             "source_type": c.get("source_type", "code"),
             "division": c.get("division"),
             "section_name": c.get("section_name"),
             "paragraph_name": c.get("paragraph_name"),
+            "tags": c.get("tags") or [],
         }
     if not doc_ids:
         return None
@@ -105,6 +105,8 @@ class BM25Index:
         indexed.sort(key=lambda x: x[1], reverse=True)
         results = []
         for pid, score in indexed[: limit * 2]:  # overfetch for filtering
+            if float(score) <= settings.bm25_min_score:
+                continue
             if id_to_payload and (source_type or tags_filter):
                 payload = id_to_payload.get(pid) or {}
                 if source_type and source_type != "all" and payload.get("source_type") != source_type:
@@ -152,3 +154,11 @@ class BM25Index:
         except Exception as e:
             logger.warning("Could not load BM25 index %s: %s", path, e)
             return None
+
+
+def _build_retrieval_text(chunk: dict[str, Any], *, include_prefix: bool) -> str:
+    snippet = chunk.get("code_snippet") or ""
+    if not include_prefix:
+        return snippet
+    prefix = (chunk.get("metadata_prefix") or "").strip()
+    return f"{prefix}\n{snippet}" if prefix else snippet

@@ -6,6 +6,13 @@ import logging
 import os
 import sys
 
+# Load .env into os.environ so GOOGLE_APPLICATION_CREDENTIALS and other vars are available to Google libs
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 # Reduce reranker/HuggingFace noise (progress bars, HTTP logs, symlink warning)
 os.environ.setdefault("TQDM_DISABLE", "1")
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
@@ -24,6 +31,7 @@ for name in ("httpx", "httpcore", "sentence_transformers", "transformers", "hugg
     logging.getLogger(name).setLevel(logging.WARNING)
 
 import hashlib
+import time
 from pathlib import Path
 from typing import Any
 
@@ -49,22 +57,14 @@ from backend.ingestion.vector_store import (
 app = FastAPI(title="LegacyLens", description="RAG over legacy codebases")
 
 # RAG chat system prompt: tune this for answer quality (see docs/CALIBRATION.md)
-CHAT_SYSTEM_PROMPT = """You are a senior code analyst for GnuCOBOL, an open-source COBOL compiler implemented in C. You are explaining code to a junior engineer: be clear, concrete, and helpful.
+CHAT_SYSTEM_PROMPT = """You are an expert GnuCOBOL architect. You are provided with retrieved context from the compiler's C source code, COBOL test suites, and documentation.
 
-You will receive numbered code/document chunks from the codebase as context. Use ONLY this context to answer. Do not use external knowledge or guess.
+Answer the user's question based strictly on this context. Do not speculate beyond what the chunks show.
 
-**CRITICAL – Use the context you are given:** If the user asks about a specific keyword, verb, or concept (e.g. EVALUATE, PERFORM, 88-level, file I/O), search every chunk for that term. If you find it in any chunk, explain what the code or docs show—do NOT reply with "not enough information." Only say "The provided context does not contain enough information to answer this. Try rephrasing with specific keywords, paragraph or function names, or file paths from the codebase." when the term or topic does not appear in any of the chunks at all.
-
-Rules:
-1. **Grounding** – Answer from the context. If the topic appears in any chunk, summarize and cite it. Only use the "not enough information" line when the context is empty or none of the chunks mention the subject.
-
-2. **Citations** – Always cite your sources with the chunk number in square brackets: [1], [2], [3]. When referring to specific code or behavior, include file path and line range (e.g. "in lib/file.cbl L45–60").
-
-3. **Lists and enumerations** – When the question asks WHO, WHAT, or for a LIST (maintainers, contributors, options, flags, files, etc.), scan every chunk and list ALL relevant items. Do not stop at the first chunk or first section; include everyone/everything mentioned across the full context.
-
-4. **Code** – When showing code examples, use fenced blocks with the right language: ```cobol or ```c.
-
-5. **Precision** – Prefer specific file paths and line numbers. Do not invent file names, line numbers, or behavior that is not stated in the context.
+- Cite sources as [1], [2], [3] with file path and line range.
+- Use ```c or ```cobol for code examples.
+- For list questions (who, what, which), enumerate every relevant item found across all chunks.
+- If the context is insufficient to answer, say so clearly and suggest a more specific query.
 """
 
 _env_frontend = os.environ.get("FRONTEND_DIR", "").strip()
@@ -697,6 +697,7 @@ def status() -> dict[str, Any]:
     """
     project = settings.google_cloud_project
     creds_env = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "").strip()
+    app_build = os.environ.get("APP_BUILD", "").strip() or None
     return {
         "status": "ok",
         "embeddings": "vertex" if project else "pseudo",
@@ -704,6 +705,13 @@ def status() -> dict[str, Any]:
         "credentials_set": bool(creds_env),
         "llm_enabled": bool(settings.llm_enabled and settings.llm_model and project),
         "llm_model": settings.llm_model if settings.llm_enabled else None,
+        "app_build": app_build,
+        "min_vector_score": settings.min_vector_score,
+        "bm25_min_score": settings.bm25_min_score,
+        "use_hybrid_search": settings.use_hybrid_search,
+        "embed_metadata_prefix": settings.embed_metadata_prefix,
+        "query_chat_final_k": settings.query_chat_final_k,
+        "query_chat_top_k": settings.query_chat_top_k,
     }
 
 
@@ -772,12 +780,9 @@ def query_chat(req: ChatRequest) -> ChatResponse:
         # When user asks about a specific doc file, fetch its chunks directly (avoids retrieval misses)
         doc_file = _extract_doc_filename(req.query)
         if doc_file:
-            raw_chunks = get_chunks_for_file(client, doc_file)
-            if not raw_chunks and doc_file != doc_file.lower():
-                raw_chunks = get_chunks_for_file(client, doc_file.lower())
-            if not raw_chunks:
-                chunks_list, _ = list_chunks(client, limit=200, file_path_contains=doc_file)
-                raw_chunks = [c for c in chunks_list if doc_file.lower() in (c.get("file_path") or "").lower()]
+            # Paths are stored as e.g. "gnucobol-3.2_win/THANKS" — use substring match directly
+            chunks_list, _ = list_chunks(client, limit=200, file_path_contains=doc_file.lower())
+            raw_chunks = [c for c in chunks_list if doc_file.lower() in (c.get("file_path") or "").lower()]
             if raw_chunks:
                 raw_chunks.sort(key=lambda c: (c.get("start_line") or 0))
                 results = [
@@ -856,6 +861,9 @@ def query_chat(req: ChatRequest) -> ChatResponse:
     context = "\n\n---\n\n".join(
         _format_chunk(i, r) for i, r in enumerate(results, 1)
     )
+    logger.info("Chat context: %d chunks, %d chars", len(results), len(context))
+    # Unique token so Vertex/Gemini doesn't return a cached response for similar prompts
+    _req_id = str(int(time.time() * 1000))
     full_prompt = (
         f"{CHAT_SYSTEM_PROMPT}\n"
         "---\n\n"
@@ -863,6 +871,7 @@ def query_chat(req: ChatRequest) -> ChatResponse:
         f"{context or '(No chunks retrieved.)'}\n\n"
         "---\n\n"
         f"**Question:** {req.query}\n\n"
+        f"[Request {_req_id}]\n\n"
         "**Answer:**"
     )
 
@@ -884,7 +893,7 @@ def query_chat(req: ChatRequest) -> ChatResponse:
                 contents=full_prompt,
                 config=GenerateContentConfig(
                     max_output_tokens=settings.llm_max_output_tokens,
-                    temperature=0.2,
+                    temperature=0.35,
                 ),
             )
             answer = resp.text if resp and resp.text else "(No response from LLM)"
@@ -943,14 +952,14 @@ def get_file_content(
     has_filesystem = settings.code_root and settings.code_root.is_dir()
     if has_filesystem:
         base = settings.code_root.resolve()
-        fp = (base / path) if not Path(path).is_absolute() else Path(path)
-        fp = fp.resolve()
+        if Path(path).is_absolute():
+            raise HTTPException(status_code=400, detail="Absolute paths are not allowed")
+        fp = (base / path).resolve()
         try:
             fp.relative_to(base)
         except ValueError:
-            pass
-        else:
-            if fp.is_file():
+            raise HTTPException(status_code=400, detail="Path is outside code root")
+        if fp.is_file():
                 try:
                     text = fp.read_text(encoding="utf-8", errors="replace")
                 except OSError as e:
@@ -1045,6 +1054,18 @@ def list_stored_chunks(
 @app.on_event("startup")
 def startup():
     logger.info("LegacyLens API ready – POST /query, /admin/reingest, etc.")
+    # Warn loudly if BM25 index is missing — hybrid search silently degrades without it
+    from backend.ingestion.bm25_index import BM25Index
+    bm25 = BM25Index.load()
+    if bm25 is None:
+        logger.warning(
+            "WARNING: BM25 index not found at '%s'. "
+            "Hybrid search is DISABLED — only vector search will be used. "
+            "Run ingestion to build the index.",
+            settings.bm25_index_path,
+        )
+    else:
+        logger.info("BM25 index loaded: %d docs", len(bm25.doc_ids))
 
 @app.post("/query", response_model=QueryResponse)
 def query(req: QueryRequest) -> QueryResponse:

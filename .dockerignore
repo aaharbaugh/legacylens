@@ -12,7 +12,7 @@ __pycache__
 # Local data (not needed in container – use Qdrant Cloud in prod)
 .qdrant_data
 embeddings.json
-bm25_index.pkl
+# bm25_index.pkl is included in the image for hybrid search on Cloud Run
 
 # Secrets (inject via env at runtime)
 .env

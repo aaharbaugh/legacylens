@@ -90,7 +90,7 @@ function displayCachedAnswer(answer, results) {
       const direction = btn.dataset.direction || "down";
       let startLine = parseInt(btn.dataset.startLine, 10) || 0;
       let endLine = parseInt(btn.dataset.endLine, 10) || 0;
-      const block = btn.closest(".answer-code-block");
+      const block = btn.closest(".answer-code-block") || btn.closest(".cite-source-block");
       const pre = block?.querySelector("pre");
       const code = pre?.querySelector("code");
       const topBtn = block?.querySelector(".expand-top");
@@ -160,6 +160,7 @@ function displayCachedAnswer(answer, results) {
           block?.classList.add("expanded");
           const collapseBtn = block?.querySelector(".collapse-btn");
           if (collapseBtn) collapseBtn.style.display = "";
+          if (block?.classList.contains("cite-source-block")) bottomBtn?.setAttribute("data-end-line", String(endLine));
           safeHighlightCode(code);
           pre.classList.add("stream-in");
           setTimeout(() => pre.classList.remove("stream-in"), 350);
@@ -617,10 +618,12 @@ function formatAnswerWithCode(text, results) {
     .join("");
 
   if (results.length > 0) {
-    body += '<div class="cite-sources"><details><summary>Sources</summary>';
+    body += '<div class="cite-sources"><details open><summary>Sources</summary>';
     results.forEach((chunk, i) => {
       const n = i + 1;
       const path = chunk?.file_path || "?";
+      const startLine = chunk?.start_line ?? 0;
+      const endLine = chunk?.end_line ?? 0;
       const rrfScore = chunk?.score != null ? chunk.score.toFixed(4) : "?";
       const vecScore = chunk?.vector_score != null ? chunk.vector_score.toFixed(4) : null;
       const scoreStr = vecScore != null
@@ -628,7 +631,16 @@ function formatAnswerWithCode(text, results) {
         : `RRF=${rrfScore}`;
       const langClass = inferLanguage(path, chunk?.language);
       const snippet = escapeHtml((chunk?.code_snippet || "").trim());
-      body += `<div id="cite-${n}" class="cite-source-block" data-cite="${n}"><span class="cite-source-label"><span class="cite-source-path">[${n}] ${path}</span><span class="cite-source-score" title="RRF=rank fusion score (higher=better). cosine=vector similarity 0-1.">${scoreStr}</span></span><pre><code class="language-${langClass}">${snippet}</code></pre></div>`;
+      const pathAttr = path && path !== "?" ? ` data-path="${escapeHtml(path)}" data-start-line="${startLine}" data-end-line="${endLine}"` : "";
+      body += `<div id="cite-source-${n}" class="cite-source-block" data-cite="${n}"${pathAttr}><span class="cite-source-label"><span class="cite-source-path">[${n}] ${path}</span><span class="cite-source-score" title="RRF=rank fusion score (higher=better). cosine=vector similarity 0-1.">${scoreStr}</span></span><div class="cite-source-code-container">`;
+      if (path && path !== "?" && startLine > 1) {
+        body += `<button type="button" class="expand-btn expand-top answer-show-more" data-path="${escapeHtml(path)}" data-start-line="${startLine}" data-end-line="${endLine}" data-direction="up" data-lang="${langClass}" data-cite="${n}" title="Load more lines above">↟</button>`;
+      }
+      body += `<pre><code class="language-${langClass}">${snippet}</code></pre>`;
+      if (path && path !== "?") {
+        body += `<button type="button" class="expand-btn expand-bottom answer-show-more" data-path="${escapeHtml(path)}" data-start-line="${startLine}" data-end-line="${endLine}" data-direction="down" data-lang="${langClass}" data-cite="${n}" title="Load more lines below">↡</button>`;
+      }
+      body += `</div></div>`;
     });
     body += "</details></div>";
   }

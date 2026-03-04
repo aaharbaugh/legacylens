@@ -226,9 +226,17 @@ class Embedder:
         return results
 
     def embed_chunks(self, chunks: list[dict[str, Any]]) -> list[list[float]]:
-        """Embed by search_text (metadata prefix + snippet) or code_snippet when prefix disabled."""
+        """Embed by code_snippet, optionally prefixed by metadata_prefix."""
         if settings.embed_metadata_prefix:
-            texts = [c.get("search_text") or c.get("code_snippet") or "" for c in chunks]
+            texts = [self._retrieval_text(c, include_prefix=True) for c in chunks]
         else:
-            texts = [c.get("code_snippet") or "" for c in chunks]
+            texts = [self._retrieval_text(c, include_prefix=False) for c in chunks]
         return self.embed_texts(texts)
+
+    @staticmethod
+    def _retrieval_text(chunk: dict[str, Any], *, include_prefix: bool) -> str:
+        snippet = chunk.get("code_snippet") or ""
+        if not include_prefix:
+            return snippet
+        prefix = (chunk.get("metadata_prefix") or "").strip()
+        return f"{prefix}\n{snippet}" if prefix else snippet

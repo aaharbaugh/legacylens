@@ -15,8 +15,6 @@ from backend.ingestion.embedder import VECTOR_SIZE
 
 logger = logging.getLogger(__name__)
 
-COLLECTION_NAME = "legacylens-chunks"
-
 
 def _rrf_fusion(
     rank_lists: list[list[str]],

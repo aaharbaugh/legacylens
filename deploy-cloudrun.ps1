@@ -7,7 +7,8 @@
 $ErrorActionPreference = "Stop"
 $PROJECT_ID = "legacylens-489112"
 $REGION = "us-central1"
-$IMAGE = "us-central1-docker.pkg.dev/$PROJECT_ID/legacylens/legacylens:latest"
+$TAG = "v-" + (Get-Date -Format "yyyyMMdd-HHmmss")
+$IMAGE = "us-central1-docker.pkg.dev/$PROJECT_ID/legacylens/legacylens:$TAG"
 
 Write-Host "=== LegacyLens Cloud Run Deployment ===" -ForegroundColor Cyan
 Write-Host "Project: $PROJECT_ID" -ForegroundColor Gray
@@ -58,13 +59,19 @@ if ($serviceAccountLine) {
 
 $qdrantKey = (($envLines | Where-Object { $_ -match '^QDRANT_API_KEY=' }) -replace '^QDRANT_API_KEY=', '') | Select-Object -First 1
 $adminToken = (($envLines | Where-Object { $_ -match '^ADMIN_TOKEN=' }) -replace '^ADMIN_TOKEN=', '') | Select-Object -First 1
+$minVectorScore = (($envLines | Where-Object { $_ -match '^MIN_VECTOR_SCORE=' }) -replace '^MIN_VECTOR_SCORE=', '') | Select-Object -First 1
+$bm25MinScore = (($envLines | Where-Object { $_ -match '^BM25_MIN_SCORE=' }) -replace '^BM25_MIN_SCORE=', '') | Select-Object -First 1
 $qdrantKey = "$qdrantKey".Trim(); $adminToken = "$adminToken".Trim()
+$minVectorScore = "$minVectorScore".Trim()
+$bm25MinScore = "$bm25MinScore".Trim()
+if (-not $minVectorScore) { $minVectorScore = "0.15" }
+if (-not $bm25MinScore) { $bm25MinScore = "1e-9" }
 if (-not $qdrantKey -or -not $adminToken) {
   Write-Host "ERROR: .env must contain QDRANT_API_KEY and ADMIN_TOKEN" -ForegroundColor Red
   exit 1
 }
 
-$envVars = "QDRANT_URL=https://da99c893-5aa9-4a52-add7-d088a40c4534.us-east4-0.gcp.cloud.qdrant.io,QDRANT_COLLECTION=legacylens-chunks,GOOGLE_CLOUD_PROJECT=$PROJECT_ID,LLM_MODEL=gemini-2.0-flash,LLM_ENABLED=true,QDRANT_API_KEY=$qdrantKey,ADMIN_TOKEN=$adminToken,MIN_VECTOR_SCORE=0,FALLBACK_CHUNK_LINES=120,FALLBACK_OVERLAP_LINES=25,QUERY_TOP_K=50,QUERY_FINAL_K=25"
+$envVars = "QDRANT_URL=https://da99c893-5aa9-4a52-add7-d088a40c4534.us-east4-0.gcp.cloud.qdrant.io,QDRANT_COLLECTION=legacylens-chunks,GOOGLE_CLOUD_PROJECT=$PROJECT_ID,LLM_MODEL=gemini-2.0-flash,LLM_ENABLED=true,QDRANT_API_KEY=$qdrantKey,ADMIN_TOKEN=$adminToken,MIN_VECTOR_SCORE=$minVectorScore,BM25_MIN_SCORE=$bm25MinScore,FALLBACK_CHUNK_LINES=120,FALLBACK_OVERLAP_LINES=0,QUERY_TOP_K=50,QUERY_FINAL_K=25,APP_BUILD=$TAG"
 
 $deployArgs = @(
   "run", "deploy", "legacylens",
