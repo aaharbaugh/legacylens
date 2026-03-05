@@ -83,6 +83,21 @@ def _to_payload_dict(payload: Any) -> dict[str, Any]:
         return {}
 
 
+def _materialize_parent_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """
+    For summary-child hits, return parent code block fields for LLM context.
+    """
+    if not payload:
+        return payload
+    parent_code = payload.get("parent_code_snippet")
+    if parent_code:
+        payload = dict(payload)
+        payload["code_snippet"] = parent_code
+        payload["start_line"] = payload.get("parent_start_line", payload.get("start_line"))
+        payload["end_line"] = payload.get("parent_end_line", payload.get("end_line"))
+    return payload
+
+
 def make_point_id(chunk: dict[str, Any]) -> str:
     """Stable ID for idempotent upserts."""
     key = (
@@ -168,6 +183,7 @@ def search(
     score_threshold: float | None = 0.0,
     source_type: str | None = None,
     folder: str | None = None,
+    chunk_role: str | None = "child_summary",
 ) -> list[dict[str, Any]]:
     """Return top-k hits with payloads. Each hit has 'id', 'score', 'payload'."""
     coll = settings.qdrant_collection
@@ -177,6 +193,13 @@ def search(
             qmodels.FieldCondition(
                 key="source_type",
                 match=qmodels.MatchValue(value=source_type),
+            )
+        )
+    if chunk_role and chunk_role != "all":
+        must.append(
+            qmodels.FieldCondition(
+                key="chunk_role",
+                match=qmodels.MatchValue(value=chunk_role),
             )
         )
     # Note: folder filter is applied in hybrid_search in-memory to avoid requiring a payload index
@@ -190,12 +213,23 @@ def search(
         with_payload=True,
     )
     raw_points = getattr(response, "points", None) or getattr(response, "result", None) or []
+    if chunk_role and chunk_role != "all" and not raw_points:
+        # Backward compatibility for pre-hierarchy indexes missing chunk_role metadata.
+        response = client.query_points(
+            collection_name=coll,
+            query=vector,
+            query_filter=qmodels.Filter(must=[m for m in must if getattr(m, "key", None) != "chunk_role"]) if must else None,
+            limit=limit,
+            score_threshold=score_threshold,
+            with_payload=True,
+        )
+        raw_points = getattr(response, "points", None) or getattr(response, "result", None) or []
     out = []
     for p in raw_points:
         out.append({
             "id": str(p.id) if hasattr(p, "id") else "",
             "score": float(getattr(p, "score", 0) or 0),
-            "payload": _to_payload_dict(getattr(p, "payload", None)),
+            "payload": _materialize_parent_payload(_to_payload_dict(getattr(p, "payload", None))),
         })
     return out
 
@@ -230,6 +264,7 @@ def hybrid_search(
         score_threshold=score_threshold if score_threshold > 0 else 0.0,
         source_type=source_type,
         folder=folder,
+        chunk_role="child_summary",
     )
     if folder and folder.strip():
         vec_hits = [h for h in vec_hits if (h.get("payload") or {}).get("folder") == folder.strip()]
@@ -259,7 +294,12 @@ def hybrid_search(
                 for pid, _ in bm25_hits:
                     if pid not in id_to_hit:
                         payload = bm25_payloads.get(pid) or {}
-                        id_to_hit[pid] = {"id": pid, "score": 0.0, "payload": payload, "vector_score": None}
+                        id_to_hit[pid] = {
+                            "id": pid,
+                            "score": 0.0,
+                            "payload": _materialize_parent_payload(payload),
+                            "vector_score": None,
+                        }
 
     # 3. RRF fusion
     fused = _rrf_fusion(rank_lists, k=settings.rrf_k)
@@ -292,7 +332,7 @@ def hybrid_search(
                     id_to_hit[pid] = {
                         "id": pid,
                         "score": 0.0,
-                        "payload": _to_payload_dict(getattr(p, "payload", None)),
+                        "payload": _materialize_parent_payload(_to_payload_dict(getattr(p, "payload", None))),
                         "vector_score": None,
                     }
         except Exception as e:

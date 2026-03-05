@@ -24,12 +24,52 @@ from backend.ingestion.vector_store import ensure_collection, get_client, make_p
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
 logger = logging.getLogger(__name__)
 
-_INCLUDE_RE = re.compile(r'^\s*#\s*include\s+"([^"]+)"')
+_INCLUDE_RE = re.compile(r'^\s*#\s*include\s*[<"]([^">]+)[>"]')
 
 _PHASE_KEYWORDS: dict[str, tuple[str, ...]] = {
-    "frontend": ("lexer", "scanner", "token", "parser", "grammar", "parse", "syntax", "yacc", "bison"),
-    "middle-end": ("ir", "intermediate", "optimizer", "optim", "ssa", "cfg", "semantic", "analy"),
-    "backend": ("backend", "codegen", "emit", "asm", "assembler", "register", "target", "machine", "object"),
+    "frontend": (
+        "frontend",
+        "lexer",
+        "scanner",
+        "token",
+        "parser",
+        "grammar",
+        "parse",
+        "syntax",
+        "yacc",
+        "bison",
+        "ast",
+    ),
+    "middle-end": (
+        "middle-end",
+        "middle",
+        "ir",
+        "intermediate",
+        "optimizer",
+        "optim",
+        "ssa",
+        "cfg",
+        "semantic",
+        "analy",
+        "fold",
+        "lower",
+    ),
+    "backend": (
+        "backend",
+        "codegen",
+        "emit",
+        "asm",
+        "assembler",
+        "register",
+        "target",
+        "machine",
+        "object",
+        "link",
+        "runtime",
+        "decimal",
+        "comp-3",
+        "packed",
+    ),
 }
 
 
@@ -81,7 +121,7 @@ def _build_metadata_prefix(payload: dict) -> str:
 
 
 def _extract_include_headers(file_path: Path) -> list[str]:
-    """Parse local #include "header.h" dependencies from a source file."""
+    """Parse #include dependencies from a source file."""
     try:
         text = file_path.read_text(encoding="utf-8", errors="replace")
     except Exception:
@@ -109,9 +149,13 @@ def _infer_phase(norm_path: str, payload: dict) -> str:
             " ".join(str(t).lower() for t in (payload.get("tags") or [])),
         ]
     )
+    scored: list[tuple[str, int]] = []
     for phase, kws in _PHASE_KEYWORDS.items():
-        if any(k in hay for k in kws):
-            return phase
+        score = sum(1 for k in kws if k in hay)
+        scored.append((phase, score))
+    scored.sort(key=lambda x: x[1], reverse=True)
+    if scored and scored[0][1] > 0:
+        return scored[0][0]
     # Conservative fallback: compiler internals often flow middle-end by default
     return "middle-end"
 
@@ -135,9 +179,13 @@ def _attach_summaries(chunks: list[dict], summaries: list[str]) -> list[dict]:
         summary = summaries[i] if i < len(summaries) else ""
         c["summary_text"] = summary
         c["chunk_type"] = "child_summary"
+        c["chunk_role"] = "child_summary"
         # For parent-child retrieval: child points to canonical parent id.
         # Raw parent code remains in code_snippet (payload page_content analogue).
         c["retrieval_parent_id"] = c.get("parent_id")
+        c["parent_start_line"] = c.get("start_line")
+        c["parent_end_line"] = c.get("end_line")
+        c["parent_code_snippet"] = c.get("code_snippet")
         # metadata_prefix should include phase and structural context; keep summary out to reduce noise.
         c["metadata_prefix"] = _build_metadata_prefix(c)
     return chunks
@@ -204,6 +252,13 @@ def run_pipeline(
             payload["phase"] = _infer_phase(norm_path, payload)
             payload["include_headers"] = include_headers
             payload["parent_id"] = _stable_parent_id(payload)
+            payload["chunk_role"] = "parent_code"
+            payload["chunk_type"] = "parent_code"
+            tags = list(payload.get("tags") or [])
+            phase_tag = f"phase:{payload['phase']}"
+            if phase_tag not in tags:
+                tags.append(phase_tag)
+            payload["tags"] = tags
             # Recompute metadata_prefix now that file_path is normalized to relative
             payload["metadata_prefix"] = _build_metadata_prefix(payload)
             all_chunks.append(payload)
