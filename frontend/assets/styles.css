@@ -79,6 +79,41 @@ body {
   display: block;
 }
 
+.tab-btn-dev {
+  font-size: 12px;
+  color: #6b7280;
+}
+.tab-btn-dev:hover,
+.tab-btn-dev.active {
+  color: #a78bfa;
+}
+
+.logs-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  margin-top: 8px;
+}
+.logs-table th,
+.logs-table td {
+  padding: 6px 10px;
+  text-align: left;
+  border-bottom: 1px solid #1f2937;
+}
+.logs-table th {
+  color: #9ca3af;
+  font-weight: 600;
+}
+.logs-table tr:hover {
+  background: #0f172a;
+}
+.logs-table .type-query {
+  color: #38bdf8;
+}
+.logs-table .type-chat {
+  color: #a78bfa;
+}
+
 .tab-content {
   max-width: 720px;
   margin: 0 auto;

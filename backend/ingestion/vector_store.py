@@ -4,6 +4,7 @@ Hybrid search: vector + BM25 with RRF fusion, optional reranking.
 """
 import hashlib
 import logging
+import time
 from pathlib import Path
 from typing import Any
 
@@ -169,6 +170,7 @@ def hybrid_search(
     source_type: str | None = None,
     tags_filter: list[str] | None = None,
     use_reranker: bool = False,
+    out_timings: dict[str, float] | None = None,
 ) -> list[dict[str, Any]]:
     """
     Hybrid retrieval: vector + BM25 (if available) with RRF, optional reranking.
@@ -295,7 +297,10 @@ def hybrid_search(
 
     # 6. Optional reranking
     if use_reranker and settings.use_reranker and ordered and query_text.strip():
+        t0 = time.perf_counter()
         ordered = _rerank(query_text, ordered)
+        if out_timings is not None:
+            out_timings["rerank_ms"] = (time.perf_counter() - t0) * 1000
 
     return ordered[:final_k]
 

@@ -32,10 +32,18 @@ for name in ("httpx", "httpcore", "sentence_transformers", "transformers", "hugg
 
 import hashlib
 import time
+from collections import defaultdict, deque
 from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+# In-memory request logs for admin panel (observability); newest last, max 200
+_request_logs: deque[dict[str, Any]] = deque(maxlen=200)
+
+
+def _append_request_log(entry: dict[str, Any]) -> None:
+    _request_logs.append({**entry, "ts": time.time()})
+
+from fastapi import Depends, FastAPI, Header, HTTPException, Response
 
 logger = logging.getLogger(__name__)
 from fastapi.responses import FileResponse, HTMLResponse
@@ -343,6 +351,40 @@ def admin_page() -> str:
       border-top: 1px solid #111827;
       padding-top: 0.6rem;
     }
+    .logs-section { margin-top: 1.5rem; }
+    .logs-section h2 { margin: 0 0 0.5rem 0; font-size: 1rem; }
+    .logs-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.8rem;
+      margin-top: 0.5rem;
+    }
+    .logs-table th, .logs-table td {
+      padding: 0.35rem 0.5rem;
+      text-align: left;
+      border-bottom: 1px solid #1f2937;
+    }
+    .logs-table th { color: #9ca3af; font-weight: 600; }
+    .logs-table tr:hover { background: #0f172a; }
+    .logs-table .type-query { color: #38bdf8; }
+    .logs-table .type-chat { color: #a78bfa; }
+    .logs-placeholder { color: #6b7280; font-size: 0.8rem; margin-top: 0.5rem; }
+    .admin-tabs { display: flex; gap: 0.25rem; margin-bottom: 1rem; border-bottom: 1px solid #1f2937; }
+    .admin-tabs button {
+      background: none;
+      border: none;
+      border-bottom: 2px solid transparent;
+      border-radius: 0;
+      color: #9ca3af;
+      padding: 0.5rem 1rem;
+      margin-bottom: -1px;
+    }
+    .admin-tabs button:hover { color: #e5e7eb; }
+    .admin-tabs button.active { color: #38bdf8; border-bottom-color: #38bdf8; }
+    .admin-tabs button.dev-tab { font-size: 0.85rem; color: #6b7280; }
+    .admin-tabs button.dev-tab.active { color: #a78bfa; border-bottom-color: #a78bfa; }
+    .tab-panel { display: block; }
+    .tab-panel.hidden { display: none !important; }
     @media (max-width: 900px) {
       .workspace {
         grid-template-columns: 1fr;
@@ -374,6 +416,11 @@ def admin_page() -> str:
     </div>
 
     <div id="admin-tools" class="section" style="display:none;">
+      <div class="admin-tabs">
+        <button type="button" id="tab-btn-main" class="active">Main</button>
+        <button type="button" id="tab-btn-logs" class="dev-tab">Logs (dev)</button>
+      </div>
+      <div id="tab-main" class="tab-panel">
       <div class="workspace">
         <div class="pane">
           <h2>Code + docs corpus</h2>
@@ -420,6 +467,39 @@ def admin_page() -> str:
           <div id="query-results" class="listbox"></div>
         </div>
       </div>
+      </div>
+      <div id="tab-logs" class="tab-panel hidden">
+        <div class="section logs-section">
+          <h2>Request logs</h2>
+          <p class="muted" style="margin:0 0 0.5rem 0;">Development only — latency breakdown for /query and /query/chat.</p>
+          <div class="row">
+            <button id="refresh-logs-btn" class="secondary">Refresh logs</button>
+            <label style="display:inline-flex;align-items:center;gap:0.35rem;margin:0;">
+              <input type="checkbox" id="logs-auto-refresh" />
+              <span class="muted">Auto-refresh every 5s</span>
+            </label>
+          </div>
+          <div id="logs-container">
+            <div id="logs-placeholder" class="logs-placeholder">No request logs yet. Run a query or chat to see latency breakdown.</div>
+            <table id="logs-table" class="logs-table" style="display:none;">
+              <thead>
+                <tr>
+                  <th>Time</th>
+                  <th>Type</th>
+                  <th>Total (ms)</th>
+                  <th>Embed (ms)</th>
+                  <th>Search (ms)</th>
+                  <th>Rerank (ms)</th>
+                  <th>LLM (ms)</th>
+                  <th>In (tok)</th>
+                  <th>Out (tok)</th>
+                </tr>
+              </thead>
+              <tbody id="logs-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -462,6 +542,7 @@ def admin_page() -> str:
         setSessionState(true);
         refreshCount();
         loadCorpus();
+        loadLogs();
       } catch (e) {
         status.textContent = 'Network error while logging in.';
       } finally {
@@ -631,10 +712,63 @@ def admin_page() -> str:
           return `${idx + 1}. [${kind}] ${path} ${span} | ${para}\\n   ${snippet}...`;
         });
         resultsEl.textContent = lines.join('\\n\\n');
+        if (accessToken) loadLogs();
       } catch {
         status.textContent = 'Network error while searching.';
       } finally {
         btn.disabled = false;
+      }
+    }
+
+    let logsRefreshInterval = null;
+    async function loadLogs() {
+      if (!accessToken) return;
+      const placeholder = document.getElementById('logs-placeholder');
+      const table = document.getElementById('logs-table');
+      const tbody = document.getElementById('logs-tbody');
+      try {
+        const res = await fetch('/admin/logs', {
+          headers: { 'Authorization': 'Bearer ' + accessToken },
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          placeholder.textContent = 'Failed to load logs.';
+          placeholder.style.display = 'block';
+          table.style.display = 'none';
+          return;
+        }
+        const logs = data.logs || [];
+        if (!logs.length) {
+          placeholder.textContent = 'No request logs yet. Run a query or chat to see latency breakdown.';
+          placeholder.style.display = 'block';
+          table.style.display = 'none';
+          return;
+        }
+        placeholder.style.display = 'none';
+        table.style.display = 'table';
+        tbody.innerHTML = logs.map(row => {
+          const ts = row.ts ? new Date(row.ts * 1000).toLocaleTimeString() : '—';
+          const typeCls = row.type === 'chat' ? 'type-chat' : 'type-query';
+          const rerank = row.rerank_ms != null ? row.rerank_ms : '—';
+          const llm = row.llm_ms != null ? row.llm_ms : '—';
+          const inTok = row.input_tokens != null ? row.input_tokens : '—';
+          const outTok = row.output_tokens != null ? row.output_tokens : '—';
+          return `<tr>
+            <td>${ts}</td>
+            <td class="${typeCls}">${row.type || '—'}</td>
+            <td>${row.total_ms ?? '—'}</td>
+            <td>${row.embed_ms ?? '—'}</td>
+            <td>${row.search_ms ?? '—'}</td>
+            <td>${rerank}</td>
+            <td>${llm}</td>
+            <td>${inTok}</td>
+            <td>${outTok}</td>
+          </tr>`;
+        }).join('');
+      } catch {
+        placeholder.textContent = 'Network error loading logs.';
+        placeholder.style.display = 'block';
+        table.style.display = 'none';
       }
     }
 
@@ -648,6 +782,22 @@ def admin_page() -> str:
     document.getElementById('reset-btn').addEventListener('click', resetDb);
     document.getElementById('reingest-btn').addEventListener('click', reingest);
     document.getElementById('run-query-btn').addEventListener('click', runQuery);
+    document.getElementById('refresh-logs-btn').addEventListener('click', loadLogs);
+    document.getElementById('logs-auto-refresh').addEventListener('change', function() {
+      if (logsRefreshInterval) clearInterval(logsRefreshInterval);
+      logsRefreshInterval = this.checked ? setInterval(loadLogs, 5000) : null;
+    });
+
+    function showTab(name) {
+      const isMain = name === 'main';
+      document.getElementById('tab-main').classList.toggle('hidden', !isMain);
+      document.getElementById('tab-logs').classList.toggle('hidden', isMain);
+      document.getElementById('tab-btn-main').classList.toggle('active', isMain);
+      document.getElementById('tab-btn-logs').classList.toggle('active', !isMain);
+      if (!isMain) loadLogs();
+    }
+    document.getElementById('tab-btn-main').addEventListener('click', () => showTab('main'));
+    document.getElementById('tab-btn-logs').addEventListener('click', () => showTab('logs'));
   </script>
 </body>
 </html>
@@ -682,6 +832,13 @@ def admin_runtime_config() -> dict[str, Any]:
     }
 
 
+@app.get("/admin/logs", dependencies=[Depends(require_admin)])
+def admin_logs() -> dict[str, Any]:
+    """Return recent request logs (query/chat latency breakdown) for the admin panel. Newest first."""
+    logs = list(reversed(list(_request_logs)))
+    return {"logs": logs, "count": len(logs)}
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -694,6 +851,7 @@ def status() -> dict[str, Any]:
     - embeddings: "vertex" if GOOGLE_CLOUD_PROJECT is set (and credentials work at runtime), else "pseudo"
     - credentials_set: true if GOOGLE_APPLICATION_CREDENTIALS is set (local key file)
     - llm_enabled: true if LLM is configured (model + project)
+    - use_reranker: true if USE_RERANKER env is true (cross-encoder rerank for chat)
     """
     project = settings.google_cloud_project
     creds_env = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "").strip()
@@ -709,9 +867,11 @@ def status() -> dict[str, Any]:
         "min_vector_score": settings.min_vector_score,
         "bm25_min_score": settings.bm25_min_score,
         "use_hybrid_search": settings.use_hybrid_search,
+        "use_reranker": settings.use_reranker,
         "embed_metadata_prefix": settings.embed_metadata_prefix,
         "query_chat_final_k": settings.query_chat_final_k,
         "query_chat_top_k": settings.query_chat_top_k,
+        "query_chat_max_chunks_per_file": settings.query_chat_max_chunks_per_file,
     }
 
 
@@ -762,13 +922,62 @@ def _extract_doc_filename(query: str) -> str | None:
     return None
 
 
+def _truncate_snippet(snippet: str, max_lines: int) -> str:
+    """Truncate snippet to max_lines for display/response; 0 = no truncation."""
+    if not snippet or max_lines <= 0:
+        return snippet or ""
+    lines = snippet.splitlines()
+    if len(lines) <= max_lines:
+        return snippet
+    return "\n".join(lines[:max_lines]) + f"\n... ({len(lines) - max_lines} more lines)"
+
+
+def _rank_hits_by_file(
+    hits: list[dict[str, Any]],
+    max_per_file: int,
+    final_k: int,
+) -> list[dict[str, Any]]:
+    """Reorder hits: group by file, rank files by best chunk score, take up to max_per_file per file. Less context, better file diversity."""
+    if max_per_file <= 0 or not hits:
+        return hits[:final_k]
+    by_file: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for h in hits:
+        fp = (h.get("payload") or {}).get("file_path") or ""
+        by_file[fp].append(h)
+    # Sort files by best chunk score (RRF or vector_score) so best file first
+    def file_best_score(chunk_list: list[dict]) -> float:
+        return max(
+            (c.get("vector_score") if c.get("vector_score") is not None else c.get("score")) or 0
+            for c in chunk_list
+        )
+    sorted_files = sorted(
+        by_file.items(),
+        key=lambda x: file_best_score(x[1]),
+        reverse=True,
+    )
+    out: list[dict[str, Any]] = []
+    for _fp, chunks in sorted_files:
+        for c in chunks[:max_per_file]:
+            out.append(c)
+            if len(out) >= final_k:
+                return out
+    return out[:final_k]
+
+
 @app.post("/query/chat", response_model=ChatResponse)
-def query_chat(req: ChatRequest) -> ChatResponse:
+def query_chat(req: ChatRequest, response: Response) -> ChatResponse:
     """
     Run hybrid search, build context, and generate answer via Vertex AI (if LLM configured).
     Falls back to returning just the prompt when LLM is not configured.
     When query mentions a specific file (THANKS, README, etc.), fetches that file's chunks directly.
     """
+    t_total = time.perf_counter()
+    embed_ms = 0.0
+    search_ms = 0.0
+    rerank_ms: float | None = None
+    llm_ms = 0.0
+    timings: dict[str, float] = {}
+    snippet_max_lines = settings.chat_snippet_max_lines
     logger.info("Chat: %s", req.query[:60] + "..." if len(req.query) > 60 else req.query)
     if req.chunks:
         results = req.chunks
@@ -780,6 +989,7 @@ def query_chat(req: ChatRequest) -> ChatResponse:
         # When user asks about a specific doc file, fetch its chunks directly (avoids retrieval misses)
         doc_file = _extract_doc_filename(req.query)
         if doc_file:
+            t0 = time.perf_counter()
             # Paths are stored as e.g. "gnucobol-3.2_win/THANKS" — use substring match directly
             chunks_list, _ = list_chunks(client, limit=200, file_path_contains=doc_file.lower())
             raw_chunks = [c for c in chunks_list if doc_file.lower() in (c.get("file_path") or "").lower()]
@@ -796,21 +1006,27 @@ def query_chat(req: ChatRequest) -> ChatResponse:
                         division=c.get("division"),
                         section_name=c.get("section_name"),
                         paragraph_name=c.get("paragraph_name"),
-                        code_snippet=c.get("code_snippet", ""),
+                        code_snippet=_truncate_snippet(c.get("code_snippet", ""), snippet_max_lines),
                         language=c.get("language", "COBOL"),
                         source_type=c.get("source_type", "code"),
                     )
                     for c in raw_chunks[:top_k]
                 ]
+            search_ms = (time.perf_counter() - t0) * 1000
 
         if not results:
             embedder = get_embedder()
+            t0 = time.perf_counter()
             try:
                 vectors = embedder.embed_texts([req.query])
             except Exception as e:
                 raise HTTPException(status_code=500, detail=f"Embedding failed: {e}")
             if not vectors or not vectors[0]:
                 raise HTTPException(status_code=500, detail="No embedding returned")
+            embed_ms = (time.perf_counter() - t0) * 1000
+            t0 = time.perf_counter()
+            # Server USE_RERANKER (.env) controls reranker; client can opt in via req.use_reranker (frontend does not send it, so server setting wins)
+            use_reranker = settings.use_reranker or req.use_reranker
             hits = hybrid_search(
                 client,
                 vectors[0],
@@ -820,7 +1036,16 @@ def query_chat(req: ChatRequest) -> ChatResponse:
                 score_threshold=settings.query_score_threshold,
                 source_type=req.source_type if req.source_type != "all" else None,
                 tags_filter=req.tags,
-                use_reranker=req.use_reranker,
+                use_reranker=use_reranker,
+                out_timings=timings,
+            )
+            search_ms = (time.perf_counter() - t0) * 1000
+            rerank_ms = timings.get("rerank_ms")
+            # Rank by file (best file first), cap chunks per file for less context
+            hits = _rank_hits_by_file(
+                hits,
+                settings.query_chat_max_chunks_per_file,
+                top_k,
             )
             results = []
             for h in hits:
@@ -836,12 +1061,12 @@ def query_chat(req: ChatRequest) -> ChatResponse:
                         division=p.get("division"),
                         section_name=p.get("section_name"),
                         paragraph_name=p.get("paragraph_name"),
-                        code_snippet=p.get("code_snippet", ""),
+                        code_snippet=_truncate_snippet(p.get("code_snippet", ""), snippet_max_lines),
                         language=p.get("language", "COBOL"),
                         source_type=p.get("source_type", "code"),
                     )
                 )
-    max_lines = settings.chat_snippet_max_lines
+    max_lines = snippet_max_lines
 
     def _format_chunk(i: int, r: RetrievedChunk) -> str:
         meta_parts = [f"[{i}] {r.file_path} L{r.start_line}-{r.end_line}"]
@@ -852,10 +1077,6 @@ def query_chat(req: ChatRequest) -> ChatResponse:
         if r.vector_score is not None:
             meta_parts.append(f"relevance:{r.vector_score:.2f}")
         snippet = r.code_snippet or ""
-        if max_lines > 0:
-            lines = snippet.splitlines()
-            if len(lines) > max_lines:
-                snippet = "\n".join(lines[:max_lines]) + f"\n... ({len(lines) - max_lines} more lines)"
         return " | ".join(meta_parts) + "\n" + snippet
 
     context = "\n\n---\n\n".join(
@@ -888,6 +1109,7 @@ def query_chat(req: ChatRequest) -> ChatResponse:
             )
             from google.genai.types import GenerateContentConfig
 
+            t0 = time.perf_counter()
             resp = client.models.generate_content(
                 model=settings.llm_model,
                 contents=full_prompt,
@@ -896,12 +1118,46 @@ def query_chat(req: ChatRequest) -> ChatResponse:
                     temperature=0.35,
                 ),
             )
+            llm_ms = (time.perf_counter() - t0) * 1000
             answer = resp.text if resp and resp.text else "(No response from LLM)"
+            # Extract token counts from usage_metadata (Vertex/Gemini)
+            input_tokens = None
+            output_tokens = None
+            if resp and hasattr(resp, "usage_metadata") and resp.usage_metadata:
+                um = resp.usage_metadata
+                input_tokens = getattr(um, "prompt_token_count", None) or getattr(um, "promptTokenCount", None)
+                output_tokens = getattr(um, "candidates_token_count", None) or getattr(um, "candidatesTokenCount", None)
         except Exception as e:
             answer = f"(LLM error: {e})"
+            input_tokens = None
+            output_tokens = None
     else:
         answer = "(Enable LLM: set LLM_MODEL and LLM_ENABLED=true with GOOGLE_CLOUD_PROJECT)"
+        input_tokens = None
+        output_tokens = None
 
+    total_ms = (time.perf_counter() - t_total) * 1000
+    logger.info(
+        "chat_latency_ms=%.0f embed_ms=%.0f search_ms=%.0f rerank_ms=%s llm_ms=%.0f input_tokens=%s output_tokens=%s",
+        total_ms,
+        embed_ms,
+        search_ms,
+        f"{rerank_ms:.0f}" if rerank_ms is not None else "n/a",
+        llm_ms,
+        input_tokens if input_tokens is not None else "n/a",
+        output_tokens if output_tokens is not None else "n/a",
+    )
+    _append_request_log({
+        "type": "chat",
+        "total_ms": round(total_ms, 0),
+        "embed_ms": round(embed_ms, 0),
+        "search_ms": round(search_ms, 0),
+        "rerank_ms": round(rerank_ms, 0) if rerank_ms is not None else None,
+        "llm_ms": round(llm_ms, 0),
+        "input_tokens": int(input_tokens) if input_tokens is not None else None,
+        "output_tokens": int(output_tokens) if output_tokens is not None else None,
+    })
+    response.headers["X-Request-Duration-Ms"] = str(int(round(total_ms)))
     return ChatResponse(query=req.query, answer=answer, results=results)
 
 
@@ -1068,21 +1324,26 @@ def startup():
         logger.info("BM25 index loaded: %d docs", len(bm25.doc_ids))
 
 @app.post("/query", response_model=QueryResponse)
-def query(req: QueryRequest) -> QueryResponse:
+def query(req: QueryRequest, response: Response) -> QueryResponse:
     """Embed the query and run hybrid search (vector + BM25 + RRF); return top-k chunks."""
+    t_total = time.perf_counter()
     logger.info("Query: %s", req.query[:60] + "..." if len(req.query) > 60 else req.query)
     embedder = get_embedder()
+    t0 = time.perf_counter()
     try:
         vectors = embedder.embed_texts([req.query])
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Embedding failed: {e}")
     if not vectors or not vectors[0]:
         raise HTTPException(status_code=500, detail="No embedding returned")
+    embed_ms = (time.perf_counter() - t0) * 1000
     client = get_vector_store()
     top_k = req.top_k if req.top_k is not None else settings.query_final_k
     score_threshold = (
         req.score_threshold if req.score_threshold is not None else settings.query_score_threshold
     )
+    timings: dict[str, float] = {}
+    t0 = time.perf_counter()
     hits = hybrid_search(
         client,
         vectors[0],
@@ -1093,6 +1354,13 @@ def query(req: QueryRequest) -> QueryResponse:
         source_type=req.source_type if req.source_type != "all" else None,
         tags_filter=req.tags,
         use_reranker=req.use_reranker,
+        out_timings=timings,
+    )
+    search_ms = (time.perf_counter() - t0) * 1000
+    hits = _rank_hits_by_file(
+        hits,
+        settings.query_chat_max_chunks_per_file,
+        top_k,
     )
     results = []
     for h in hits:
@@ -1113,6 +1381,23 @@ def query(req: QueryRequest) -> QueryResponse:
                 source_type=p.get("source_type", "code"),
             )
         )
+    total_ms = (time.perf_counter() - t_total) * 1000
+    rerank_ms = timings.get("rerank_ms")
+    logger.info(
+        "query_latency_ms=%.0f embed_ms=%.0f search_ms=%.0f rerank_ms=%s",
+        total_ms,
+        embed_ms,
+        search_ms,
+        f"{rerank_ms:.0f}" if rerank_ms is not None else "n/a",
+    )
+    _append_request_log({
+        "type": "query",
+        "total_ms": round(total_ms, 0),
+        "embed_ms": round(embed_ms, 0),
+        "search_ms": round(search_ms, 0),
+        "rerank_ms": round(rerank_ms, 0) if rerank_ms is not None else None,
+    })
+    response.headers["X-Request-Duration-Ms"] = str(int(round(total_ms)))
     return QueryResponse(query=req.query, results=results)
 
 

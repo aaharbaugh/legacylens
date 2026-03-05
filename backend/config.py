@@ -54,8 +54,9 @@ class Settings(BaseSettings):
     query_top_k: int = 50  # candidates before rerank/fusion (main /query)
     query_chat_top_k: int = 30  # candidate pool for chat; larger = better for keyword queries (e.g. EVALUATE)
     query_final_k: int = 25  # chunks for /query endpoint
-    query_chat_final_k: int = 12  # chunks sent to LLM; more = better chance to hit relevant code
-    chat_snippet_max_lines: int = 50  # truncate long chunks in prompt; 0=no truncation (lower=faster LLM)
+    query_chat_final_k: int = 8  # chunks sent to LLM; fewer = less context, faster
+    query_chat_max_chunks_per_file: int = 2  # cap chunks per file (rank by file, then take best N per file); 0 = no cap
+    chat_snippet_max_lines: int = 20  # max lines per chunk in prompt and returned sources; 0=no truncation
     query_score_threshold: float = 0.0  # min cosine score at Qdrant (0=disabled)
     min_vector_score: float = 0.15  # drop results with vector_score below this (filters junk)
     use_hybrid_search: bool = True  # BM25 + vector with RRF

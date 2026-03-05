@@ -5,7 +5,7 @@
 #   python -m backend.ingestion.pipeline run --code-root gnucobol-3.2_win
 
 $ErrorActionPreference = "Stop"
-$PROJECT_ID = "legacylens-489112"
+$PROJECT_ID = "legacylens2"
 $REGION = "us-central1"
 $TAG = "v-" + (Get-Date -Format "yyyyMMdd-HHmmss")
 $IMAGE = "us-central1-docker.pkg.dev/$PROJECT_ID/legacylens/legacylens:$TAG"

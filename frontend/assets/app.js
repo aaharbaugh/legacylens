@@ -411,6 +411,66 @@ async function loadRuntimeConfig() {
   }
 }
 
+let logsRefreshInterval = null;
+async function loadLogs() {
+  const placeholder = el("logs-placeholder");
+  const table = el("logs-table");
+  const tbody = el("logs-tbody");
+  if (!placeholder || !table || !tbody) return;
+  if (!accessToken) {
+    placeholder.textContent = "Sign in (Admin tab) to load request logs.";
+    placeholder.style.display = "block";
+    table.style.display = "none";
+    return;
+  }
+  try {
+    const res = await fetch("/admin/logs", {
+      headers: authHeaders(false),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      placeholder.textContent = "Failed to load logs: " + (data.detail || res.status);
+      placeholder.style.display = "block";
+      table.style.display = "none";
+      return;
+    }
+    const logs = data.logs || [];
+    if (!logs.length) {
+      placeholder.textContent = "No request logs yet. Run a query or chat to see latency breakdown.";
+      placeholder.style.display = "block";
+      table.style.display = "none";
+      return;
+    }
+    placeholder.style.display = "none";
+    table.style.display = "table";
+    tbody.innerHTML = logs
+      .map((row) => {
+        const ts = row.ts ? new Date(row.ts * 1000).toLocaleTimeString() : "—";
+        const typeCls = row.type === "chat" ? "type-chat" : "type-query";
+        const rerank = row.rerank_ms != null ? row.rerank_ms : "—";
+        const llm = row.llm_ms != null ? row.llm_ms : "—";
+        const inTok = row.input_tokens != null ? row.input_tokens : "—";
+        const outTok = row.output_tokens != null ? row.output_tokens : "—";
+        return `<tr>
+          <td>${ts}</td>
+          <td class="${typeCls}">${row.type || "—"}</td>
+          <td>${row.total_ms ?? "—"}</td>
+          <td>${row.embed_ms ?? "—"}</td>
+          <td>${row.search_ms ?? "—"}</td>
+          <td>${rerank}</td>
+          <td>${llm}</td>
+          <td>${inTok}</td>
+          <td>${outTok}</td>
+        </tr>`;
+      })
+      .join("");
+  } catch (e) {
+    placeholder.textContent = "Network error loading logs.";
+    placeholder.style.display = "block";
+    table.style.display = "none";
+  }
+}
+
 async function resetDb() {
   const status = el("db-status");
   status.textContent = "Resetting DB...";
@@ -729,8 +789,19 @@ document.addEventListener("DOMContentLoaded", () => {
       btn.classList.add("active");
       const panel = document.getElementById(`tab-${tab}`);
       if (panel) panel.classList.add("active");
+      if (tab === "logs") loadLogs();
     });
   });
+
+  const refreshLogsBtn = el("refresh-logs-btn");
+  if (refreshLogsBtn) refreshLogsBtn.addEventListener("click", loadLogs);
+  const logsAutoRefresh = el("logs-auto-refresh");
+  if (logsAutoRefresh) {
+    logsAutoRefresh.addEventListener("change", function () {
+      if (logsRefreshInterval) clearInterval(logsRefreshInterval);
+      logsRefreshInterval = this.checked ? setInterval(loadLogs, 5000) : null;
+    });
+  }
 });
 
 el("chat-btn").addEventListener("click", () => runChat());

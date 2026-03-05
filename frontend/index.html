@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>LegacyLens Workspace</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/styles/github-dark.min.css" />
-  <link rel="stylesheet" href="/assets/styles.css?v=5" />
+  <link rel="stylesheet" href="/assets/styles.css?v=6" />
 </head>
 <body>
   <header class="topbar">
@@ -21,6 +21,7 @@
   <nav class="tabs">
     <button class="tab-btn" data-tab="admin">Admin</button>
     <button class="tab-btn active" data-tab="prompt">Prompt</button>
+    <button class="tab-btn tab-btn-dev" data-tab="logs">Logs (dev)</button>
   </nav>
 
   <main class="layout">
@@ -70,6 +71,40 @@
       </div>
     </section>
 
+    <section id="tab-logs" class="tab-panel">
+      <div class="tab-content">
+        <h2>Request logs</h2>
+        <p class="status muted">Development only — latency breakdown for /query and /query/chat. Sign in as admin to load.</p>
+        <p class="status muted" style="font-size: 0.85rem; margin-top: 0.25rem;">Embed 0 = chat used doc-file path (query mentioned THANKS, README, etc.; we fetch by filename and skip embedding). Rerank — = USE_RERANKER not true or not installed, or same doc-file path.</p>
+        <div class="inline buttons" style="margin-bottom: 0.5rem;">
+          <button id="refresh-logs-btn">Refresh logs</button>
+          <label class="inline" style="margin: 0;">
+            <input type="checkbox" id="logs-auto-refresh" />
+            <span class="muted">Auto-refresh every 5s</span>
+          </label>
+        </div>
+        <div id="logs-container">
+          <div id="logs-placeholder" class="status muted">No request logs yet. Run a query or chat to see latency breakdown.</div>
+          <table id="logs-table" class="logs-table" style="display: none;">
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Type</th>
+                <th>Total (ms)</th>
+                <th>Embed (ms)</th>
+                <th>Search (ms)</th>
+                <th>Rerank (ms)</th>
+                <th>LLM (ms)</th>
+                <th>In (tok)</th>
+                <th>Out (tok)</th>
+              </tr>
+            </thead>
+            <tbody id="logs-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
     <section id="tab-prompt" class="tab-panel active">
       <div class="prompt-layout">
         <aside class="prompt-history-sidebar">
@@ -99,6 +134,6 @@
 
   <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/highlight.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/highlightjs-cobol@0.3/dist/cobol.min.js"></script>
-  <script src="/assets/app.js?v=5"></script>
+  <script src="/assets/app.js?v=6"></script>
 </body>
 </html>
