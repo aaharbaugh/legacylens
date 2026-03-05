@@ -14,6 +14,10 @@ google-genai>=1.0.0
 # BM25 for hybrid search
 rank-bm25>=0.2.2
 
+# C AST chunking (Phase 1)
+tree-sitter>=0.20.0
+tree-sitter-c>=0.21.0
+
 # HTTP & schemas
 httpx>=0.26.0
 pydantic>=2.5.0

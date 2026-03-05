@@ -13,9 +13,10 @@ try:
 except ImportError:
     pass
 
-# Reduce reranker/HuggingFace noise (progress bars, HTTP logs, symlink warning)
+# Reduce reranker/HuggingFace noise (progress bars, HTTP logs, symlink warning, load report)
 os.environ.setdefault("TQDM_DISABLE", "1")
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
+os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
 
 # Ensure backend activity is visible in the terminal
 logging.basicConfig(
@@ -26,23 +27,53 @@ logging.basicConfig(
 )
 for name in ("backend", "uvicorn.access"):
     logging.getLogger(name).setLevel(logging.INFO)
-# Suppress noisy third-party logs (reranker, HuggingFace, httpx)
-for name in ("httpx", "httpcore", "sentence_transformers", "transformers", "huggingface_hub"):
-    logging.getLogger(name).setLevel(logging.WARNING)
+# Suppress noisy third-party logs (reranker load report, HuggingFace, httpx, GenAI AFC)
+for name in ("httpx", "httpcore", "sentence_transformers", "transformers", "huggingface_hub", "google_genai.models"):
+    logging.getLogger(name).setLevel(logging.ERROR)
 
 import hashlib
+import json
 import time
 from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+# Prefetch cache: key (query_trimmed, folder) -> { "chunks": list[dict], "ts": float }
+_prefetch_cache: dict[tuple[str, str], dict[str, Any]] = {}
+# Prefetch cooldown: (query_trimmed,) -> last_embed_ts (skip re-embedding within cooldown window)
+_prefetch_last_embed: dict[tuple[str, ...], float] = {}
+
+from fastapi import Depends, FastAPI, Header, HTTPException, Response
 
 logger = logging.getLogger(__name__)
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
 
+from backend.api.ask_service import run_api_ask, run_api_ask_stream
+from backend.api.chat_service import run_query_chat
 from backend.config import settings
+from backend.api.retrieval_utils import (
+    hits_to_retrieved_chunks as _hits_to_retrieved_chunks,
+    rank_hits_by_file as _rank_hits_by_file,
+)
+from backend.api.request_logs import (
+    append_request_log as _append_request_log,
+    load_request_logs as _load_request_logs,
+    recent_request_logs,
+)
+from backend.api.schemas import (
+    AdminLoginRequest,
+    AdminLoginResponse,
+    AdminReingestRequest,
+    AskRequest,
+    AskResponse,
+    ChatRequest,
+    ChatResponse,
+    PrefetchRequest,
+    PrefetchResponse,
+    QueryRequest,
+    QueryResponse,
+    RetrievedChunk,
+)
 from backend.ingestion.embedder import Embedder
 from backend.ingestion.pipeline import run_pipeline
 from backend.ingestion.vector_store import (
@@ -52,6 +83,7 @@ from backend.ingestion.vector_store import (
     hybrid_search,
     list_chunks,
     reset_collection,
+    warm_bm25_index_cache,
 )
 
 app = FastAPI(title="LegacyLens", description="RAG over legacy codebases")
@@ -82,66 +114,6 @@ def get_embedder() -> Embedder:
     if _embedder is None:
         _embedder = Embedder()
     return _embedder
-
-
-class QueryRequest(BaseModel):
-    query: str
-    top_k: int | None = None  # uses settings.query_final_k if unset
-    score_threshold: float | None = None  # uses settings if unset
-    source_type: str = "all"
-    tags: list[str] | None = None  # filter by tags e.g. ["file_io", "para:MAIN"]
-    use_reranker: bool = False
-
-
-class RetrievedChunk(BaseModel):
-    id: str
-    score: float  # RRF fusion score (for ordering)
-    vector_score: float | None = None  # cosine similarity from vector search
-    file_path: str
-    start_line: int
-    end_line: int
-    division: str | None
-    section_name: str | None
-    paragraph_name: str | None
-    code_snippet: str
-    language: str = "COBOL"
-    source_type: str = "code"
-
-
-class QueryResponse(BaseModel):
-    query: str
-    results: list[RetrievedChunk]
-
-
-class ChatRequest(BaseModel):
-    query: str
-    top_k: int | None = None
-    source_type: str = "all"
-    tags: list[str] | None = None
-    use_reranker: bool = False
-    chunks: list[RetrievedChunk] | None = None  # when set, skip vector search and use these chunks only
-
-
-class ChatResponse(BaseModel):
-    query: str
-    answer: str
-    results: list[RetrievedChunk]
-
-
-class AdminLoginRequest(BaseModel):
-    token: str
-
-
-class AdminLoginResponse(BaseModel):
-    access_token: str
-    token_type: str = "bearer"
-
-
-class AdminReingestRequest(BaseModel):
-    code_root: str | None = None
-    code_extensions: str | None = None
-    batch_size: int | None = None
-    max_files: int | None = None
 
 
 def _make_session_token(admin_token: str) -> str:
@@ -189,469 +161,10 @@ def app_page() -> FileResponse:
     return root()
 
 
-@app.get("/admin", response_class=HTMLResponse)
-def admin_page() -> str:
-    """
-    Minimal admin UI with:
-    - login form (ADMIN_TOKEN)
-    - buttons for reset DB and reingest
-    """
-    return """
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <title>LegacyLens Admin</title>
-  <style>
-    body {
-      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      background: #0f172a;
-      color: #e5e7eb;
-      display: flex;
-      justify-content: center;
-      align-items: flex-start;
-      min-height: 100vh;
-      margin: 0;
-      padding: 2rem;
-    }
-    .card {
-      background: #020617;
-      border-radius: 0.75rem;
-      padding: 1.5rem 2rem 2rem;
-      box-shadow: 0 20px 30px rgba(15,23,42,0.7);
-      max-width: 1200px;
-      width: 100%;
-      border: 1px solid #1f2937;
-    }
-    h1 {
-      font-size: 1.5rem;
-      margin-bottom: 0.25rem;
-    }
-    .subtitle {
-      font-size: 0.875rem;
-      color: #9ca3af;
-      margin-bottom: 1.5rem;
-    }
-    label {
-      display: block;
-      font-size: 0.875rem;
-      margin-bottom: 0.25rem;
-    }
-    input[type="password"],
-    input[type="text"] {
-      width: 100%;
-      padding: 0.5rem 0.75rem;
-      border-radius: 0.5rem;
-      border: 1px solid #374151;
-      background: #020617;
-      color: #e5e7eb;
-      font-size: 0.9rem;
-      box-sizing: border-box;
-    }
-    input[type="password"]:focus,
-    input[type="text"]:focus {
-      outline: none;
-      border-color: #38bdf8;
-      box-shadow: 0 0 0 1px #38bdf8;
-    }
-    button {
-      border-radius: 999px;
-      border: none;
-      padding: 0.45rem 1rem;
-      font-size: 0.9rem;
-      cursor: pointer;
-      display: inline-flex;
-      align-items: center;
-      gap: 0.35rem;
-    }
-    button.primary {
-      background: linear-gradient(135deg, #38bdf8, #6366f1);
-      color: white;
-    }
-    button.secondary {
-      background: #111827;
-      color: #e5e7eb;
-      border: 1px solid #374151;
-    }
-    button:disabled {
-      opacity: 0.6;
-      cursor: default;
-    }
-    .section {
-      margin-top: 1.5rem;
-      padding-top: 1.25rem;
-      border-top: 1px solid #111827;
-    }
-    .row {
-      display: flex;
-      gap: 0.75rem;
-      align-items: center;
-      margin-top: 0.75rem;
-      flex-wrap: wrap;
-    }
-    .status {
-      margin-top: 0.75rem;
-      font-size: 0.8rem;
-      color: #9ca3af;
-      min-height: 1.2em;
-      white-space: pre-line;
-    }
-    .pill {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.35rem;
-      padding: 0.15rem 0.6rem;
-      border-radius: 999px;
-      background: #111827;
-      border: 1px solid #1f2937;
-      font-size: 0.75rem;
-      color: #9ca3af;
-    }
-    .pill-dot {
-      width: 0.4rem;
-      height: 0.4rem;
-      border-radius: 999px;
-      background: #22c55e;
-      box-shadow: 0 0 0 2px rgba(34,197,94,0.25);
-    }
-    .muted {
-      color: #6b7280;
-      font-size: 0.75rem;
-    }
-    .workspace {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 1rem;
-      margin-top: 1rem;
-    }
-    .pane {
-      border: 1px solid #1f2937;
-      border-radius: 0.6rem;
-      padding: 0.9rem;
-      background: #020617;
-    }
-    .pane h2 {
-      margin: 0 0 0.5rem 0;
-      font-size: 1rem;
-    }
-    .listbox {
-      margin-top: 0.6rem;
-      font-size: 0.8rem;
-      white-space: pre-line;
-      max-height: 240px;
-      overflow: auto;
-      border-top: 1px solid #111827;
-      padding-top: 0.6rem;
-    }
-    @media (max-width: 900px) {
-      .workspace {
-        grid-template-columns: 1fr;
-      }
-    }
-  </style>
-</head>
-<body>
-  <div class="card">
-    <div style="display:flex;justify-content:space-between;align-items:center;gap:0.5rem;">
-      <div>
-        <h1>LegacyLens Admin</h1>
-        <div class="subtitle">Manage ingestion and the vector DB for your legacy codebase.</div>
-      </div>
-      <div class="pill">
-        <span class="pill-dot"></span>
-        <span id="session-pill">Signed out</span>
-      </div>
-    </div>
-
-    <div id="login-section">
-      <label for="admin-token">Admin token</label>
-      <input id="admin-token" type="password" autocomplete="current-password" />
-      <div class="row" style="margin-top:0.75rem;">
-        <button id="login-btn" class="primary">Sign in</button>
-        <span class="muted">Uses ADMIN_TOKEN from your .env file.</span>
-      </div>
-      <div id="login-status" class="status"></div>
-    </div>
-
-    <div id="admin-tools" class="section" style="display:none;">
-      <div class="workspace">
-        <div class="pane">
-          <h2>Code + docs corpus</h2>
-          <div style="display:flex;justify-content:space-between;align-items:center;gap:0.5rem;">
-            <div id="db-summary" class="muted"></div>
-            <select id="browse-source" class="secondary" style="padding:0.35rem 0.7rem;border-radius:999px;">
-              <option value="all">All</option>
-              <option value="code">Code only</option>
-              <option value="docs">Docs only</option>
-            </select>
-          </div>
-          <div class="row">
-            <button id="refresh-count-btn" class="secondary">Refresh chunk count</button>
-            <button id="load-corpus-btn" class="secondary">Load sample chunks</button>
-          </div>
-          <div id="corpus-list" class="listbox muted"></div>
-          <div class="row">
-            <button id="reset-btn" class="secondary">Reset DB</button>
-          </div>
-          <div class="status" id="db-status"></div>
-          <label for="code-root" style="margin-top:0.75rem;">Code root (optional, overrides CODE_ROOT)</label>
-          <input id="code-root" type="text" placeholder="C:\\path\\to\\legacy\\code" />
-          <label for="code-extensions" style="margin-top:0.75rem;">Extensions</label>
-          <input id="code-extensions" type="text" placeholder="* (all files) or .cob,.cbl,.c,.h,.md" value="*" />
-          <div class="row">
-            <button id="reingest-btn" class="primary">Reset + reingest</button>
-          </div>
-          <div class="status" id="reingest-status"></div>
-        </div>
-
-        <div class="pane">
-          <h2>Query workspace</h2>
-          <label for="query-text">Search query</label>
-          <input id="query-text" type="text" placeholder="e.g. interest calculation, file io, parser option..." />
-          <div class="row">
-            <select id="query-source" class="secondary" style="padding:0.35rem 0.7rem;border-radius:999px;">
-              <option value="all">Search all</option>
-              <option value="code">Search code</option>
-              <option value="docs">Search docs</option>
-            </select>
-            <button id="run-query-btn" class="primary">Run query</button>
-          </div>
-          <div class="status" id="query-status"></div>
-          <div id="query-results" class="listbox"></div>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <script>
-    let accessToken = null;
-
-    function setSessionState(signedIn) {
-      const pill = document.getElementById('session-pill');
-      pill.textContent = signedIn ? 'Signed in' : 'Signed out';
-      document.getElementById('login-section').style.display = signedIn ? 'none' : 'block';
-      document.getElementById('admin-tools').style.display = signedIn ? 'block' : 'none';
-    }
-
-    async function login() {
-      const token = document.getElementById('admin-token').value.trim();
-      const status = document.getElementById('login-status');
-      status.textContent = '';
-      if (!token) {
-        status.textContent = 'Enter your admin token.';
-        return;
-      }
-      const btn = document.getElementById('login-btn');
-      btn.disabled = true;
-      status.textContent = 'Signing in...';
-      try {
-        const res = await fetch('/admin/login', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({ token }),
-        });
-        if (!res.ok) {
-          const data = await res.json().catch(() => ({}));
-          status.textContent = data.detail || 'Login failed.';
-          btn.disabled = false;
-          return;
-        }
-        const data = await res.json();
-        accessToken = data.access_token;
-        status.textContent = 'Signed in.';
-        setSessionState(true);
-        refreshCount();
-        loadCorpus();
-      } catch (e) {
-        status.textContent = 'Network error while logging in.';
-      } finally {
-        btn.disabled = false;
-      }
-    }
-
-    async function refreshCount() {
-      const status = document.getElementById('db-status');
-      const summary = document.getElementById('db-summary');
-      const source = document.getElementById('browse-source').value;
-      status.textContent = '';
-      summary.textContent = 'Loading...';
-      try {
-        const res = await fetch('/chunks?limit=1&source_type=' + encodeURIComponent(source));
-        if (!res.ok) {
-          summary.textContent = 'Error loading chunk count.';
-          return;
-        }
-        const data = await res.json();
-        summary.textContent = data.total_chunks + ' total chunks (' + source + ')';
-      } catch {
-        summary.textContent = 'Error loading chunk count.';
-      }
-    }
-
-    async function loadCorpus() {
-      const source = document.getElementById('browse-source').value;
-      const list = document.getElementById('corpus-list');
-      list.textContent = 'Loading chunks...';
-      try {
-        const res = await fetch('/chunks?limit=20&source_type=' + encodeURIComponent(source));
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) {
-          list.textContent = data.detail || 'Failed to load corpus chunks.';
-          return;
-        }
-        const chunks = data.chunks || [];
-        if (!chunks.length) {
-          list.textContent = 'No chunks for this source filter.';
-          return;
-        }
-        const lines = chunks.map((c, idx) => {
-          const path = c.file_path || '?';
-          const span = `L${c.start_line ?? '?'}-${c.end_line ?? '?'}`;
-          const kind = c.source_type || 'code';
-          const lang = c.language || '?';
-          return `${idx + 1}. [${kind}/${lang}] ${path} ${span}`;
-        });
-        list.textContent = lines.join('\\n');
-      } catch {
-        list.textContent = 'Network error while loading corpus chunks.';
-      }
-    }
-
-    async function resetDb() {
-      const status = document.getElementById('db-status');
-      status.textContent = 'Resetting collection...';
-      const btn = document.getElementById('reset-btn');
-      btn.disabled = true;
-      try {
-        const res = await fetch('/admin/reset-db', {
-          method: 'POST',
-          headers: {
-            'Authorization': 'Bearer ' + accessToken,
-          },
-        });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) {
-          const detail = data.detail || JSON.stringify(data) || 'Reset failed.';
-          status.textContent = 'Reset failed: ' + detail;
-        } else {
-          status.textContent = 'Reset complete. total_chunks=' + (data.total_chunks ?? 0);
-          refreshCount();
-        }
-      } catch {
-        status.textContent = 'Network error while resetting DB.';
-      } finally {
-        btn.disabled = false;
-      }
-    }
-
-    async function reingest() {
-      const codeRoot = document.getElementById('code-root').value.trim();
-      const codeExtensions = document.getElementById('code-extensions').value.trim();
-      const status = document.getElementById('reingest-status');
-      status.textContent = 'Reingesting... this may take a while.';
-      const btn = document.getElementById('reingest-btn');
-      btn.disabled = true;
-      try {
-        const body = {};
-        if (codeRoot) {
-          body.code_root = codeRoot;
-        }
-        if (codeExtensions) {
-          body.code_extensions = codeExtensions;
-        }
-        const res = await fetch('/admin/reingest', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': 'Bearer ' + accessToken,
-          },
-          body: JSON.stringify(body),
-        });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) {
-          const detail = data.detail || JSON.stringify(data) || 'Reingest failed.';
-          status.textContent = 'Reingest failed: ' + detail;
-        } else {
-          status.textContent =
-            'Reingest complete. files=' + (data.files_ingested ?? 0) +
-            ', chunks=' + (data.chunks_upserted ?? 0) +
-            ', total_chunks=' + (data.total_chunks ?? 0) +
-            ', ext=' + (data.code_extensions ?? '?');
-          refreshCount();
-        }
-      } catch {
-        status.textContent = 'Network error while reingesting.';
-      } finally {
-        btn.disabled = false;
-      }
-    }
-
-    async function runQuery() {
-      const q = document.getElementById('query-text').value.trim();
-      const source = document.getElementById('query-source').value;
-      const status = document.getElementById('query-status');
-      const resultsEl = document.getElementById('query-results');
-      status.textContent = '';
-      resultsEl.textContent = '';
-      if (!q) {
-        status.textContent = 'Enter a query to search.';
-        return;
-      }
-      const btn = document.getElementById('run-query-btn');
-      btn.disabled = true;
-      status.textContent = 'Searching...';
-      try {
-        const res = await fetch('/query', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            query: q,
-            top_k: 10,
-            score_threshold: 0.0,
-            source_type: source,
-          }),
-        });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) {
-          status.textContent = data.detail || 'Search failed.';
-          return;
-        }
-        const results = data.results || [];
-        if (!results.length) {
-          status.textContent = 'No results.';
-          return;
-        }
-        status.textContent = `Found ${results.length} chunks.`;
-        const lines = results.map((r, idx) => {
-          const path = r.file_path || '?';
-          const span = `L${r.start_line ?? '?'}-${r.end_line ?? '?'}`;
-          const kind = r.source_type || 'code';
-          const para = r.paragraph_name || '(no paragraph)';
-          const snippet = (r.code_snippet || '').replace(/\\n/g, ' ').slice(0, 140);
-          return `${idx + 1}. [${kind}] ${path} ${span} | ${para}\\n   ${snippet}...`;
-        });
-        resultsEl.textContent = lines.join('\\n\\n');
-      } catch {
-        status.textContent = 'Network error while searching.';
-      } finally {
-        btn.disabled = false;
-      }
-    }
-
-    document.getElementById('login-btn').addEventListener('click', login);
-    document.getElementById('refresh-count-btn').addEventListener('click', refreshCount);
-    document.getElementById('load-corpus-btn').addEventListener('click', loadCorpus);
-    document.getElementById('browse-source').addEventListener('change', () => {
-      refreshCount();
-      loadCorpus();
-    });
-    document.getElementById('reset-btn').addEventListener('click', resetDb);
-    document.getElementById('reingest-btn').addEventListener('click', reingest);
-    document.getElementById('run-query-btn').addEventListener('click', runQuery);
-  </script>
-</body>
-</html>
-    """
+@app.get("/admin")
+def admin_page() -> RedirectResponse:
+    """Legacy admin route: redirect to the unified frontend app."""
+    return RedirectResponse(url="/app", status_code=307)
 
 
 @app.post("/admin/login", response_model=AdminLoginResponse)
@@ -682,6 +195,13 @@ def admin_runtime_config() -> dict[str, Any]:
     }
 
 
+@app.get("/admin/logs", dependencies=[Depends(require_admin)])
+def admin_logs() -> dict[str, Any]:
+    """Return recent request logs (query/chat latency breakdown) for the admin panel. Newest first."""
+    logs = recent_request_logs()
+    return {"logs": logs, "count": len(logs)}
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -694,6 +214,7 @@ def status() -> dict[str, Any]:
     - embeddings: "vertex" if GOOGLE_CLOUD_PROJECT is set (and credentials work at runtime), else "pseudo"
     - credentials_set: true if GOOGLE_APPLICATION_CREDENTIALS is set (local key file)
     - llm_enabled: true if LLM is configured (model + project)
+    - use_reranker: true if USE_RERANKER env is true (cross-encoder rerank for chat)
     """
     project = settings.google_cloud_project
     creds_env = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "").strip()
@@ -709,9 +230,15 @@ def status() -> dict[str, Any]:
         "min_vector_score": settings.min_vector_score,
         "bm25_min_score": settings.bm25_min_score,
         "use_hybrid_search": settings.use_hybrid_search,
+        "use_reranker": settings.use_reranker,
         "embed_metadata_prefix": settings.embed_metadata_prefix,
         "query_chat_final_k": settings.query_chat_final_k,
         "query_chat_top_k": settings.query_chat_top_k,
+        "query_chat_max_chunks_per_file": settings.query_chat_max_chunks_per_file,
+        "embed_batch_size": settings.embed_batch_size,
+        "prefetch_enabled": getattr(settings, "prefetch_enabled", True),
+        "prefetch_min_query_length": getattr(settings, "prefetch_min_query_length", 12),
+        "prefetch_cooldown_sec": getattr(settings, "prefetch_cooldown_sec", 15.0),
     }
 
 
@@ -748,161 +275,133 @@ def health_db() -> dict[str, Any]:
         }
 
 
-# Known extensionless doc files - when query mentions these, fetch by file for reliable retrieval
-_DOC_FILENAMES = frozenset({"thanks", "readme", "authors", "news", "copying", "todo", "changelog"})
+def _get_prefetch_cache_key(query: str, folder: str) -> tuple[str, str]:
+    return (query.strip(), (folder or "").strip())
 
 
-def _extract_doc_filename(query: str) -> str | None:
-    """If query mentions a known doc file (e.g. 'THANKS file'), return its name."""
-    import re
-    q = query.lower()
-    for name in _DOC_FILENAMES:
-        if re.search(rf"\b{re.escape(name)}\b", q):
-            return name.upper()
-    return None
+def _get_cached_prefetch_chunks(query: str, folder: str) -> list[RetrievedChunk] | None:
+    """Return cached chunks if present and not expired."""
+    key = _get_prefetch_cache_key(query, folder)
+    entry = _prefetch_cache.get(key)
+    if not entry:
+        return None
+    ttl = getattr(settings, "prefetch_cache_ttl_sec", 120) or 120
+    if time.time() - entry["ts"] > ttl:
+        del _prefetch_cache[key]
+        return None
+    return entry.get("chunks")
+
+
+def _set_prefetch_cache(query: str, folder: str, chunks: list[RetrievedChunk]) -> None:
+    key = _get_prefetch_cache_key(query, folder)
+    _prefetch_cache[key] = {"chunks": chunks, "ts": time.time()}
+
+
+@app.post("/api/prefetch", response_model=PrefetchResponse)
+def api_prefetch(req: PrefetchRequest) -> PrefetchResponse:
+    """
+    Prefetch: embed query, run folder-filtered hybrid search, rerank top 15, cache top 3.
+    No LLM call. Respects prefetch_enabled, prefetch_min_query_length, prefetch_cooldown_sec to reduce quota.
+    """
+    query = (req.query or "").strip()
+    if not query:
+        return PrefetchResponse(ok=True)
+    if not getattr(settings, "prefetch_enabled", True):
+        return PrefetchResponse(ok=True)
+    min_len = getattr(settings, "prefetch_min_query_length", 12) or 0
+    if len(query) < min_len:
+        return PrefetchResponse(ok=True)
+    cooldown = getattr(settings, "prefetch_cooldown_sec", 15.0) or 0
+    if cooldown > 0:
+        key_embed = (query,)
+        last = _prefetch_last_embed.get(key_embed, 0)
+        if time.time() - last < cooldown:
+            # Reuse existing cache if present; do not call Vertex
+            existing = _get_cached_prefetch_chunks(query, (req.folder or "").strip() or "")
+            if existing is not None:
+                return PrefetchResponse(ok=True)
+    folder = (req.folder or "").strip() or None
+    embedder = get_embedder()
+    try:
+        vectors = embedder.embed_texts([query])
+    except Exception as e:
+        logger.warning("Prefetch embed failed: %s", e)
+        return PrefetchResponse(ok=True)
+    if cooldown > 0:
+        _prefetch_last_embed[(query,)] = time.time()
+    if not vectors or not vectors[0]:
+        return PrefetchResponse(ok=True)
+    client = get_vector_store()
+    top_k = getattr(settings, "prefetch_candidates_k", 15) or 15
+    cache_top = getattr(settings, "prefetch_cache_top_k", 3) or 3
+    timings: dict[str, float] = {}
+    use_reranker = getattr(settings, "ask_use_reranker", False)
+    hits = hybrid_search(
+        client,
+        vectors[0],
+        query,
+        top_k=top_k,
+        final_k=cache_top,
+        score_threshold=settings.query_score_threshold,
+        source_type=None,
+        folder=folder,
+        use_reranker=use_reranker,
+        out_timings=timings,
+    )
+    chunks = _hits_to_retrieved_chunks(hits, settings.chat_snippet_max_lines)
+    _set_prefetch_cache(query, folder or "", chunks)
+    logger.info("Prefetch cached %d chunks for query len=%d folder=%s", len(chunks), len(query), folder)
+    return PrefetchResponse(ok=True)
+
+
+@app.post("/api/ask", response_model=AskResponse)
+async def api_ask(req: AskRequest, response: Response) -> AskResponse:
+    return await run_api_ask(req, _resolve_ask_chunks)
+
+
+def _resolve_ask_chunks(
+    query: str,
+    folder: str | None,
+    out_timings: dict[str, float] | None = None,
+) -> list[RetrievedChunk]:
+    """Resolve chunks for ask (cache or live retrieval). Optionally fill out_timings with embed_ms, search_ms, rerank_ms."""
+    chunks = _get_cached_prefetch_chunks(query, folder or "")
+    if chunks:
+        return chunks
+    t0 = time.perf_counter()
+    embedder = get_embedder()
+    vectors = embedder.embed_texts([query])
+    if not vectors or not vectors[0]:
+        return []
+    if out_timings is not None:
+        out_timings["embed_ms"] = (time.perf_counter() - t0) * 1000
+    client = get_vector_store()
+    top_k = getattr(settings, "prefetch_cache_top_k", 3) or 3
+    use_reranker = getattr(settings, "ask_use_reranker", False)
+    hits = hybrid_search(
+        client,
+        vectors[0],
+        query,
+        top_k=getattr(settings, "prefetch_candidates_k", 15) or 15,
+        final_k=top_k,
+        score_threshold=settings.query_score_threshold,
+        source_type=None,
+        folder=folder,
+        use_reranker=use_reranker,
+        out_timings=out_timings,
+    )
+    hits = _rank_hits_by_file(hits, settings.query_chat_max_chunks_per_file, top_k)
+    return _hits_to_retrieved_chunks(hits, settings.chat_snippet_max_lines)
+
+
+@app.post("/api/ask/stream")
+async def api_ask_stream(req: AskRequest):
+    return await run_api_ask_stream(req, _resolve_ask_chunks)
 
 
 @app.post("/query/chat", response_model=ChatResponse)
-def query_chat(req: ChatRequest) -> ChatResponse:
-    """
-    Run hybrid search, build context, and generate answer via Vertex AI (if LLM configured).
-    Falls back to returning just the prompt when LLM is not configured.
-    When query mentions a specific file (THANKS, README, etc.), fetches that file's chunks directly.
-    """
-    logger.info("Chat: %s", req.query[:60] + "..." if len(req.query) > 60 else req.query)
-    if req.chunks:
-        results = req.chunks
-    else:
-        client = get_vector_store()
-        top_k = req.top_k if req.top_k is not None else settings.query_chat_final_k
-        results = []
-
-        # When user asks about a specific doc file, fetch its chunks directly (avoids retrieval misses)
-        doc_file = _extract_doc_filename(req.query)
-        if doc_file:
-            # Paths are stored as e.g. "gnucobol-3.2_win/THANKS" — use substring match directly
-            chunks_list, _ = list_chunks(client, limit=200, file_path_contains=doc_file.lower())
-            raw_chunks = [c for c in chunks_list if doc_file.lower() in (c.get("file_path") or "").lower()]
-            if raw_chunks:
-                raw_chunks.sort(key=lambda c: (c.get("start_line") or 0))
-                results = [
-                    RetrievedChunk(
-                        id=c.get("id", ""),
-                        score=0.0,
-                        vector_score=None,
-                        file_path=c.get("file_path", ""),
-                        start_line=c.get("start_line", 0),
-                        end_line=c.get("end_line", 0),
-                        division=c.get("division"),
-                        section_name=c.get("section_name"),
-                        paragraph_name=c.get("paragraph_name"),
-                        code_snippet=c.get("code_snippet", ""),
-                        language=c.get("language", "COBOL"),
-                        source_type=c.get("source_type", "code"),
-                    )
-                    for c in raw_chunks[:top_k]
-                ]
-
-        if not results:
-            embedder = get_embedder()
-            try:
-                vectors = embedder.embed_texts([req.query])
-            except Exception as e:
-                raise HTTPException(status_code=500, detail=f"Embedding failed: {e}")
-            if not vectors or not vectors[0]:
-                raise HTTPException(status_code=500, detail="No embedding returned")
-            hits = hybrid_search(
-                client,
-                vectors[0],
-                req.query,
-                top_k=settings.query_chat_top_k,
-                final_k=top_k,
-                score_threshold=settings.query_score_threshold,
-                source_type=req.source_type if req.source_type != "all" else None,
-                tags_filter=req.tags,
-                use_reranker=req.use_reranker,
-            )
-            results = []
-            for h in hits:
-                p = h.get("payload") or {}
-                results.append(
-                    RetrievedChunk(
-                        id=h.get("id", ""),
-                        score=h.get("score", 0.0),
-                        vector_score=h.get("vector_score"),
-                        file_path=p.get("file_path", ""),
-                        start_line=p.get("start_line", 0),
-                        end_line=p.get("end_line", 0),
-                        division=p.get("division"),
-                        section_name=p.get("section_name"),
-                        paragraph_name=p.get("paragraph_name"),
-                        code_snippet=p.get("code_snippet", ""),
-                        language=p.get("language", "COBOL"),
-                        source_type=p.get("source_type", "code"),
-                    )
-                )
-    max_lines = settings.chat_snippet_max_lines
-
-    def _format_chunk(i: int, r: RetrievedChunk) -> str:
-        meta_parts = [f"[{i}] {r.file_path} L{r.start_line}-{r.end_line}"]
-        if r.paragraph_name:
-            meta_parts.append(f"para:{r.paragraph_name}")
-        if r.section_name and r.section_name != r.paragraph_name:
-            meta_parts.append(f"section:{r.section_name}")
-        if r.vector_score is not None:
-            meta_parts.append(f"relevance:{r.vector_score:.2f}")
-        snippet = r.code_snippet or ""
-        if max_lines > 0:
-            lines = snippet.splitlines()
-            if len(lines) > max_lines:
-                snippet = "\n".join(lines[:max_lines]) + f"\n... ({len(lines) - max_lines} more lines)"
-        return " | ".join(meta_parts) + "\n" + snippet
-
-    context = "\n\n---\n\n".join(
-        _format_chunk(i, r) for i, r in enumerate(results, 1)
-    )
-    logger.info("Chat context: %d chunks, %d chars", len(results), len(context))
-    # Unique token so Vertex/Gemini doesn't return a cached response for similar prompts
-    _req_id = str(int(time.time() * 1000))
-    full_prompt = (
-        f"{CHAT_SYSTEM_PROMPT}\n"
-        "---\n\n"
-        "**Context** (numbered chunks; each has file path, line range, then code):\n\n"
-        f"{context or '(No chunks retrieved.)'}\n\n"
-        "---\n\n"
-        f"**Question:** {req.query}\n\n"
-        f"[Request {_req_id}]\n\n"
-        "**Answer:**"
-    )
-
-    if settings.llm_enabled and settings.llm_model and settings.google_cloud_project:
-        try:
-            from google import genai
-            from google.genai.types import HttpOptions
-
-            client = genai.Client(
-                vertexai=True,
-                project=settings.google_cloud_project,
-                location=settings.google_cloud_location,
-                http_options=HttpOptions(api_version="v1"),
-            )
-            from google.genai.types import GenerateContentConfig
-
-            resp = client.models.generate_content(
-                model=settings.llm_model,
-                contents=full_prompt,
-                config=GenerateContentConfig(
-                    max_output_tokens=settings.llm_max_output_tokens,
-                    temperature=0.35,
-                ),
-            )
-            answer = resp.text if resp and resp.text else "(No response from LLM)"
-        except Exception as e:
-            answer = f"(LLM error: {e})"
-    else:
-        answer = "(Enable LLM: set LLM_MODEL and LLM_ENABLED=true with GOOGLE_CLOUD_PROJECT)"
-
-    return ChatResponse(query=req.query, answer=answer, results=results)
+def query_chat(req: ChatRequest, response: Response) -> ChatResponse:
+    return run_query_chat(req, response, get_embedder, get_vector_store, CHAT_SYSTEM_PROMPT)
 
 
 @app.get("/find-file")
@@ -1053,11 +552,11 @@ def list_stored_chunks(
 
 @app.on_event("startup")
 def startup():
+    _load_request_logs()
     logger.info("LegacyLens API ready – POST /query, /admin/reingest, etc.")
     # Warn loudly if BM25 index is missing — hybrid search silently degrades without it
-    from backend.ingestion.bm25_index import BM25Index
-    bm25 = BM25Index.load()
-    if bm25 is None:
+    bm25_docs = warm_bm25_index_cache()
+    if bm25_docs <= 0:
         logger.warning(
             "WARNING: BM25 index not found at '%s'. "
             "Hybrid search is DISABLED — only vector search will be used. "
@@ -1065,24 +564,29 @@ def startup():
             settings.bm25_index_path,
         )
     else:
-        logger.info("BM25 index loaded: %d docs", len(bm25.doc_ids))
+        logger.info("BM25 index loaded: %d docs", bm25_docs)
 
 @app.post("/query", response_model=QueryResponse)
-def query(req: QueryRequest) -> QueryResponse:
+def query(req: QueryRequest, response: Response) -> QueryResponse:
     """Embed the query and run hybrid search (vector + BM25 + RRF); return top-k chunks."""
+    t_total = time.perf_counter()
     logger.info("Query: %s", req.query[:60] + "..." if len(req.query) > 60 else req.query)
     embedder = get_embedder()
+    t0 = time.perf_counter()
     try:
         vectors = embedder.embed_texts([req.query])
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Embedding failed: {e}")
     if not vectors or not vectors[0]:
         raise HTTPException(status_code=500, detail="No embedding returned")
+    embed_ms = (time.perf_counter() - t0) * 1000
     client = get_vector_store()
     top_k = req.top_k if req.top_k is not None else settings.query_final_k
     score_threshold = (
         req.score_threshold if req.score_threshold is not None else settings.query_score_threshold
     )
+    timings: dict[str, float] = {}
+    t0 = time.perf_counter()
     hits = hybrid_search(
         client,
         vectors[0],
@@ -1093,6 +597,13 @@ def query(req: QueryRequest) -> QueryResponse:
         source_type=req.source_type if req.source_type != "all" else None,
         tags_filter=req.tags,
         use_reranker=req.use_reranker,
+        out_timings=timings,
+    )
+    search_ms = (time.perf_counter() - t0) * 1000
+    hits = _rank_hits_by_file(
+        hits,
+        settings.query_chat_max_chunks_per_file,
+        top_k,
     )
     results = []
     for h in hits:
@@ -1113,6 +624,23 @@ def query(req: QueryRequest) -> QueryResponse:
                 source_type=p.get("source_type", "code"),
             )
         )
+    total_ms = (time.perf_counter() - t_total) * 1000
+    rerank_ms = timings.get("rerank_ms")
+    logger.info(
+        "query_latency_ms=%.0f embed_ms=%.0f search_ms=%.0f rerank_ms=%s",
+        total_ms,
+        embed_ms,
+        search_ms,
+        f"{rerank_ms:.0f}" if rerank_ms is not None else "n/a",
+    )
+    _append_request_log({
+        "type": "query",
+        "total_ms": round(total_ms, 0),
+        "embed_ms": round(embed_ms, 0),
+        "search_ms": round(search_ms, 0),
+        "rerank_ms": round(rerank_ms, 0) if rerank_ms is not None else None,
+    })
+    response.headers["X-Request-Duration-Ms"] = str(int(round(total_ms)))
     return QueryResponse(query=req.query, results=results)
 
 
