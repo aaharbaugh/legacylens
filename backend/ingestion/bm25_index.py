@@ -62,6 +62,10 @@ def build_index(chunks: list[dict[str, Any]]) -> "BM25Index | None":
             "section_name": c.get("section_name"),
             "paragraph_name": c.get("paragraph_name"),
             "tags": c.get("tags") or [],
+            "folder": c.get("folder"),
+            "calls_functions": c.get("calls_functions") or [],
+            "uses_structs": c.get("uses_structs") or [],
+            "function_name": c.get("function_name"),
         }
     if not doc_ids:
         return None
@@ -91,11 +95,11 @@ class BM25Index:
         limit: int = 50,
         source_type: str | None = None,
         tags_filter: list[str] | None = None,
+        folder_filter: str | None = None,
         id_to_payload: dict[str, dict] | None = None,
     ) -> list[tuple[str, float]]:
         """
-        Return top limit (point_id, score) pairs. Optional filter by source_type/tags
-        if id_to_payload is provided.
+        Return top limit (point_id, score) pairs. Optional filter by source_type/tags/folder.
         """
         tokens = _tokenize(query)
         if not tokens:
@@ -103,18 +107,21 @@ class BM25Index:
         scores = self.bm25.get_scores(tokens)
         indexed = list(zip(self.doc_ids, scores))
         indexed.sort(key=lambda x: x[1], reverse=True)
+        payload_src = id_to_payload if id_to_payload else self.id_to_payload
         results = []
-        for pid, score in indexed[: limit * 2]:  # overfetch for filtering
+        for pid, score in indexed[: limit * 3]:  # overfetch for filtering
             if float(score) <= settings.bm25_min_score:
                 continue
-            if id_to_payload and (source_type or tags_filter):
-                payload = id_to_payload.get(pid) or {}
-                if source_type and source_type != "all" and payload.get("source_type") != source_type:
+            payload = payload_src.get(pid) or {}
+            if source_type and source_type != "all" and payload.get("source_type") != source_type:
+                continue
+            if tags_filter:
+                chunk_tags = set(payload.get("tags") or [])
+                if not any(t in chunk_tags for t in tags_filter):
                     continue
-                if tags_filter:
-                    chunk_tags = set(payload.get("tags") or [])
-                    if not any(t in chunk_tags for t in tags_filter):
-                        continue
+            if folder_filter and folder_filter.strip():
+                if payload.get("folder") != folder_filter.strip():
+                    continue
             results.append((pid, float(score)))
             if len(results) >= limit:
                 break
@@ -157,7 +164,7 @@ class BM25Index:
 
 
 def _build_retrieval_text(chunk: dict[str, Any], *, include_prefix: bool) -> str:
-    snippet = chunk.get("code_snippet") or ""
+    snippet = chunk.get("summary_text") or chunk.get("code_snippet") or ""
     if not include_prefix:
         return snippet
     prefix = (chunk.get("metadata_prefix") or "").strip()

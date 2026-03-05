@@ -113,6 +113,9 @@ body {
 .logs-table .type-chat {
   color: #a78bfa;
 }
+.logs-table .type-ask {
+  color: #34d399;
+}
 
 .tab-content {
   max-width: 720px;
@@ -458,6 +461,15 @@ button:disabled {
   font-size: 11px;
   color: #93c5fd;
   white-space: nowrap;
+}
+
+.routing-badge-container {
+  margin-top: 6px;
+  margin-bottom: 4px;
+}
+
+.routing-badge {
+  font-weight: 500;
 }
 
 .result-meta {

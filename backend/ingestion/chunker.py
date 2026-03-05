@@ -1,6 +1,6 @@
 """
 COBOL-aware chunking: paragraph/section boundaries (Area A) with fixed-size fallback.
-Populates structural and role tags for filtering and boosted retrieval.
+C/C Header: Tree-sitter AST chunking at function/struct level with Graph RAG metadata.
 """
 import re
 from dataclasses import dataclass
@@ -38,9 +38,13 @@ class CodeChunk:
     file_ext: str | None = None
     tags: list[str] | None = None
     program_id: str | None = None
+    # Graph RAG / C AST metadata (Phase 1)
+    calls_functions: list[str] | None = None
+    uses_structs: list[str] | None = None
+    function_name: str | None = None  # C function or struct name for this chunk
 
     def to_payload(self) -> dict:
-        return {
+        payload = {
             "file_path": self.file_path,
             "start_line": self.start_line,
             "end_line": self.end_line,
@@ -55,6 +59,13 @@ class CodeChunk:
             "tags": self.tags or [],
             "program_id": self.program_id,
         }
+        if self.calls_functions is not None:
+            payload["calls_functions"] = self.calls_functions
+        if self.uses_structs is not None:
+            payload["uses_structs"] = self.uses_structs
+        if self.function_name is not None:
+            payload["function_name"] = self.function_name
+        return payload
 
     @property
     def metadata_prefix(self) -> str:
@@ -68,6 +79,8 @@ class CodeChunk:
             parts.append(f"[section:{self.section_name}]")
         if self.paragraph_name:
             parts.append(f"[para:{self.paragraph_name}]")
+        if self.function_name:
+            parts.append(f"[fn:{self.function_name}]")
         parts.append(Path(self.file_path).name)
         parts.append(f"L{self.start_line}-{self.end_line}")
         if self.tags:
@@ -359,6 +372,54 @@ def _chunk_fixed_size(
         )
 
 
+def _chunk_c_ast(
+    text: str,
+    file_path: str,
+    path: Path,
+    language: str,
+    source_type: str,
+    file_ext: str | None,
+) -> list[CodeChunk]:
+    """
+    Chunk C/C Header by function and struct using Tree-sitter.
+    Returns list of CodeChunk with calls_functions and uses_structs set.
+    Returns [] if Tree-sitter unavailable or parse yields nothing.
+    """
+    try:
+        from backend.ingestion.c_ast import chunk_c_ast
+    except ImportError:
+        return []
+    raw = chunk_c_ast(path, text)
+    if not raw:
+        return []
+    chunks: list[CodeChunk] = []
+    for c in raw:
+        name = c.name or None
+        tags = [f"c_ast:{c.kind}"]
+        if name:
+            tags.append(f"fn:{name}")
+        chunks.append(
+            CodeChunk(
+                file_path=file_path,
+                start_line=c.start_line,
+                end_line=c.end_line,
+                division=None,
+                section_name=None,
+                paragraph_name=name,
+                code_snippet=c.code_snippet,
+                language=language,
+                source_type=source_type,
+                file_ext=file_ext,
+                tags=tags,
+                program_id=None,
+                calls_functions=c.calls_functions,
+                uses_structs=c.uses_structs,
+                function_name=name,
+            )
+        )
+    return chunks
+
+
 def chunk_file(
     file_path: Path | str,
     *,
@@ -429,20 +490,33 @@ def chunk_file(
                 )
             )
     else:
-        # Non-COBOL text/code should not get COBOL paragraph metadata/tags.
-        chunks = list(
-            _chunk_fixed_size(
-                lines,
+        # C/C Header: AST-level chunking at function/struct when Tree-sitter available.
+        chunks = []
+        if language in ("C", "C Header"):
+            text = "\n".join(lines)
+            chunks = _chunk_c_ast(
+                text,
                 str(path),
-                fallback_chunk_lines,
-                fallback_overlap_lines,
+                path,
                 language=language,
                 source_type=source_type,
                 file_ext=file_ext,
-                program_id=None,
-                infer_role_tags=False,
             )
-        )
+        if not chunks:
+            # Non-COBOL (or C AST failed): fixed-size fallback.
+            chunks = list(
+                _chunk_fixed_size(
+                    lines,
+                    str(path),
+                    fallback_chunk_lines,
+                    fallback_overlap_lines,
+                    language=language,
+                    source_type=source_type,
+                    file_ext=file_ext,
+                    program_id=None,
+                    infer_role_tags=False,
+                )
+            )
 
     for c in chunks:
         c.language = language

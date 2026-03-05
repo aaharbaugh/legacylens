@@ -1,10 +1,12 @@
 """
 Embedding generation: Google Gen AI SDK (Vertex AI backend) with batch + cache.
 Fallback: deterministic pseudo-embeddings for local dev without GCP.
+Ingestion uses sequential sub-batches + optional delay to stay under Vertex quota (2 req/s).
 """
 import hashlib
 import json
 import logging
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
@@ -89,12 +91,15 @@ def _embed_one_batch(
 
 
 def _get_genai_embeddings(texts: list[str]) -> list[list[float]]:
-    """Call Google Gen AI SDK (Vertex AI backend). Splits by token limit, runs sub-batches in parallel."""
+    """Call Google Gen AI SDK (Vertex AI backend). Splits by token limit; runs sub-batches with optional throttle to stay under 2 req/s."""
     project = settings.google_cloud_project
     if not project:
         raise ValueError("GOOGLE_CLOUD_PROJECT must be set for Vertex embeddings")
     max_tokens = settings.embed_max_tokens_per_request
     sub_batches = _split_texts_by_token_limit(texts, max_tokens)
+    delay_sec = getattr(settings, "embed_delay_between_requests_sec", 0.0) or 0.0
+    max_workers = max(1, min(getattr(settings, "embed_max_workers", 1), len(sub_batches)))
+    # Sequential (max_workers=1) avoids 4-way burst that causes 429; delay only if still rate-limited
 
     if len(sub_batches) == 1:
         return _embed_one_batch(
@@ -105,9 +110,23 @@ def _get_genai_embeddings(texts: list[str]) -> list[list[float]]:
             settings.embed_dimensions,
         )
 
-    # Multiple sub-batches: run in parallel (max 4 workers to avoid rate limits)
+    # Multiple sub-batches: sequential (max_workers=1) or limited parallel + delay to avoid 429
     all_vectors: list[list[float]] = []
-    max_workers = min(4, len(sub_batches))
+    if max_workers <= 1:
+        for i, sub in enumerate(sub_batches):
+            if delay_sec > 0 and i > 0:
+                time.sleep(delay_sec)
+            all_vectors.extend(
+                _embed_one_batch(
+                    sub,
+                    project,
+                    settings.google_cloud_location,
+                    settings.embed_model,
+                    settings.embed_dimensions,
+                )
+            )
+        return all_vectors
+
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         futures = {
             ex.submit(
@@ -124,6 +143,8 @@ def _get_genai_embeddings(texts: list[str]) -> list[list[float]]:
         for fut in as_completed(futures):
             i = futures[fut]
             results[i] = fut.result()
+            if delay_sec > 0:
+                time.sleep(delay_sec)
     for r in results:
         all_vectors.extend(r)
     return all_vectors
@@ -235,7 +256,8 @@ class Embedder:
 
     @staticmethod
     def _retrieval_text(chunk: dict[str, Any], *, include_prefix: bool) -> str:
-        snippet = chunk.get("code_snippet") or ""
+        # Summary-first indexing: embed summary text when available, keep raw code in payload.
+        snippet = chunk.get("summary_text") or chunk.get("code_snippet") or ""
         if not include_prefix:
             return snippet
         prefix = (chunk.get("metadata_prefix") or "").strip()

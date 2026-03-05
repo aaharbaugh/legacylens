@@ -74,12 +74,12 @@
     <section id="tab-logs" class="tab-panel">
       <div class="tab-content">
         <h2>Request logs</h2>
-        <p class="status muted">Development only — latency breakdown for /query and /query/chat. Sign in as admin to load.</p>
-        <p class="status muted" style="font-size: 0.85rem; margin-top: 0.25rem;">Embed 0 = chat used doc-file path (query mentioned THANKS, README, etc.; we fetch by filename and skip embedding). Rerank — = USE_RERANKER not true or not installed, or same doc-file path.</p>
+        <p class="status muted">Development only — latency breakdown for /query, /query/chat, and /api/ask (stream). Sign in as admin to load.</p>
+        <p class="status muted" style="font-size: 0.85rem; margin-top: 0.25rem;">Embed 0 = prefetch cache hit. Rerank — = off. LLM (ms) = wall‑clock for parallel intro + extractor (slower of the two).</p>
         <div class="inline buttons" style="margin-bottom: 0.5rem;">
           <button id="refresh-logs-btn">Refresh logs</button>
           <label class="inline" style="margin: 0;">
-            <input type="checkbox" id="logs-auto-refresh" />
+            <input type="checkbox" id="logs-auto-refresh" checked />
             <span class="muted">Auto-refresh every 5s</span>
           </label>
         </div>
@@ -95,6 +95,7 @@
                 <th>Search (ms)</th>
                 <th>Rerank (ms)</th>
                 <th>LLM (ms)</th>
+                <th title="Intro (quick) | Extractor (heavy)">Intro|Extract</th>
                 <th>In (tok)</th>
                 <th>Out (tok)</th>
               </tr>
@@ -116,6 +117,9 @@
           <div class="prompt-area">
             <label for="query-text" class="prompt-label">Ask about your codebase</label>
             <textarea id="query-text" rows="4" placeholder="e.g. What does #ifndef __cplusplus do?"></textarea>
+            <div id="routing-badge-container" class="routing-badge-container" aria-live="polite" style="display: none;">
+              <span id="routing-badge" class="badge routing-badge">Targeting: <span id="routing-folder"></span>/</span>
+            </div>
             <div class="prompt-suggestions" aria-label="Tips for better results">
               <span class="prompt-suggestions-label">Better results:</span>
               <button type="button" class="prompt-suggestion-bubble" data-insert="What does [file path or keyword] do? (e.g. file.cbl, EVALUATE)">Include file path or keyword</button>

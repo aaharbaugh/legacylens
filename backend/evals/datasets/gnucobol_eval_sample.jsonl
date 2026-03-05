@@ -1,0 +1,3 @@
+{"query":"Where is the compiler option parsing logic handled?","expected_paths":["gnucobol-3.2_win/cobc/cobc.c"],"source_type":"code","answer_must_contain":["option"],"answer_must_not_contain":["i cannot access"]}
+{"query":"Which area implements COBOL runtime file I/O operations?","expected_paths":["gnucobol-3.2_win/libcob/fileio.c"],"source_type":"code","answer_must_contain":["file"],"answer_must_not_contain":["hallucination"]}
+{"query":"Where is README or THANKS documentation stored?","expected_paths":["gnucobol-3.2_win/README","gnucobol-3.2_win/THANKS"],"source_type":"all","chat_top_k":6}
