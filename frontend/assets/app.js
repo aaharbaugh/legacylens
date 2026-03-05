@@ -5,7 +5,61 @@ let lastQueryResults = [];
 const PROMPT_HISTORY_KEY = "legacylens_prompt_history";
 const PROMPT_HISTORY_MAX = 10;
 
+/** Keywords (lowercase) that map to a target folder for zero-latency routing and prefetch filter. */
+const KEYWORD_TO_FOLDER = [
+  { keywords: ["copy", "cobol", "cbl", "cob", "evaluate", "perform", "move ", "display", "accept", "file "], folder: "libcob" },
+  { keywords: ["parser", "scanner", "lex", "grammar", "compile", "cobc", "codegen", "tree", "ast", "reserved"], folder: "cobc" },
+  { keywords: ["config", "option", "flag", "cli", "main "], folder: "cobc" },
+  { keywords: ["intrinsic", "builtin", "call ", "runtime"], folder: "libcob" },
+];
+
+const PREFETCH_DEBOUNCE_MS = 1800;
+const PREFETCH_MIN_QUERY_LENGTH = 12;
+
 const el = (id) => document.getElementById(id);
+
+function getTargetFolderFromQuery(query) {
+  const q = (query || "").toLowerCase().trim();
+  if (!q) return null;
+  for (const { keywords, folder } of KEYWORD_TO_FOLDER) {
+    for (const kw of keywords) {
+      if (q.includes(kw)) return folder;
+    }
+  }
+  return null;
+}
+
+function updateRoutingBadge(folder) {
+  const container = el("routing-badge-container");
+  const folderSpan = el("routing-folder");
+  if (!container || !folderSpan) return;
+  if (folder) {
+    folderSpan.textContent = folder;
+    container.style.display = "";
+  } else {
+    container.style.display = "none";
+  }
+}
+
+let prefetchDebounceTimer = null;
+let prefetchAbortController = null;
+
+function schedulePrefetch(query, folder) {
+  if (prefetchDebounceTimer) clearTimeout(prefetchDebounceTimer);
+  prefetchDebounceTimer = setTimeout(() => {
+    prefetchDebounceTimer = null;
+    const q = (query || "").trim();
+    if (!q || q.length < PREFETCH_MIN_QUERY_LENGTH) return;
+    if (prefetchAbortController) prefetchAbortController.abort();
+    prefetchAbortController = new AbortController();
+    fetch("/api/prefetch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query: q, folder: folder || "" }),
+      signal: prefetchAbortController.signal,
+    }).catch(() => {});
+  }, PREFETCH_DEBOUNCE_MS);
+}
 
 function loadPromptHistory() {
   try {
@@ -84,13 +138,42 @@ function displayCachedAnswer(answer, results) {
     for (let i = 1; i <= total; i++) lines.push(lineMap[i] ?? "");
     return { lines, total };
   }
+  answerEl.querySelectorAll(".load-source-btn").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const path = btn.dataset.path;
+      const startLine = parseInt(btn.dataset.startLine, 10) || 1;
+      const endLine = parseInt(btn.dataset.endLine, 10) || 1;
+      const langClass = btn.dataset.lang || "plaintext";
+      const block = btn.closest(".cite-source-block");
+      const pre = block?.querySelector("pre");
+      const code = pre?.querySelector("code");
+      if (!path || !code) return;
+      btn.disabled = true;
+      btn.textContent = "…";
+      try {
+        const res = await fetch(`/file-content?path=${encodeURIComponent(path)}&start_line=${startLine}&end_line=${endLine}`);
+        const data = await res.json().catch(() => ({}));
+        if (res.ok && data.content != null) {
+          code.textContent = data.content;
+          pre.style.display = "";
+          btn.style.display = "none";
+          safeHighlightCode(code);
+        } else {
+          btn.textContent = "View code (failed)";
+        }
+      } catch {
+        btn.textContent = "View code (failed)";
+      }
+      btn.disabled = false;
+    });
+  });
   answerEl.querySelectorAll(".answer-show-more").forEach((btn) => {
     btn.addEventListener("click", async () => {
       const path = btn.dataset.path;
       const direction = btn.dataset.direction || "down";
       let startLine = parseInt(btn.dataset.startLine, 10) || 0;
       let endLine = parseInt(btn.dataset.endLine, 10) || 0;
-      const block = btn.closest(".answer-code-block");
+      const block = btn.closest(".answer-code-block") || btn.closest(".cite-source-block");
       const pre = block?.querySelector("pre");
       const code = pre?.querySelector("code");
       const topBtn = block?.querySelector(".expand-top");
@@ -160,6 +243,7 @@ function displayCachedAnswer(answer, results) {
           block?.classList.add("expanded");
           const collapseBtn = block?.querySelector(".collapse-btn");
           if (collapseBtn) collapseBtn.style.display = "";
+          if (block?.classList.contains("cite-source-block")) bottomBtn?.setAttribute("data-end-line", String(endLine));
           safeHighlightCode(code);
           pre.classList.add("stream-in");
           setTimeout(() => pre.classList.remove("stream-in"), 350);
@@ -410,6 +494,68 @@ async function loadRuntimeConfig() {
   }
 }
 
+let logsRefreshInterval = null;
+async function loadLogs() {
+  const placeholder = el("logs-placeholder");
+  const table = el("logs-table");
+  const tbody = el("logs-tbody");
+  if (!placeholder || !table || !tbody) return;
+  if (!accessToken) {
+    placeholder.textContent = "Sign in (Admin tab) to load request logs.";
+    placeholder.style.display = "block";
+    table.style.display = "none";
+    return;
+  }
+  try {
+    const res = await fetch("/admin/logs", {
+      headers: authHeaders(false),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      placeholder.textContent = "Failed to load logs: " + (data.detail || res.status);
+      placeholder.style.display = "block";
+      table.style.display = "none";
+      return;
+    }
+    const logs = data.logs || [];
+    if (!logs.length) {
+      placeholder.textContent = "No request logs yet. Sign in (Admin tab), then run a query, chat, or ask to see latency breakdown.";
+      placeholder.style.display = "block";
+      table.style.display = "none";
+      return;
+    }
+    placeholder.style.display = "none";
+    table.style.display = "table";
+    tbody.innerHTML = logs
+      .map((row) => {
+        const ts = row.ts ? new Date(row.ts * 1000).toLocaleTimeString() : "—";
+        const typeCls = row.type === "chat" ? "type-chat" : (row.type === "ask" || row.type === "ask_stream" ? "type-ask" : "type-query");
+        const rerank = row.rerank_ms != null ? row.rerank_ms : "—";
+        const llm = row.llm_ms != null ? row.llm_ms : "—";
+        const introExtract = (row.intro_ms != null && row.extractor_ms != null) ? `${row.intro_ms} | ${row.extractor_ms}` : "—";
+        const inTok = row.input_tokens != null ? row.input_tokens : "—";
+        const outTok = row.output_tokens != null ? row.output_tokens : "—";
+        return `<tr>
+          <td>${ts}</td>
+          <td class="${typeCls}">${row.type || "—"}</td>
+          <td>${row.total_ms ?? "—"}</td>
+          <td>${row.embed_ms ?? "—"}</td>
+          <td>${row.search_ms ?? "—"}</td>
+          <td>${rerank}</td>
+          <td>${llm}</td>
+          <td>${introExtract}</td>
+          <td>${inTok}</td>
+          <td>${outTok}</td>
+        </tr>`;
+      })
+      .join("");
+  } catch (e) {
+    placeholder.textContent = "Network error loading logs.";
+    placeholder.style.display = "block";
+    table.style.display = "none";
+  }
+}
+
 async function resetDb() {
   const status = el("db-status");
   status.textContent = "Resetting DB...";
@@ -617,18 +763,35 @@ function formatAnswerWithCode(text, results) {
     .join("");
 
   if (results.length > 0) {
-    body += '<div class="cite-sources"><details><summary>Sources</summary>';
+    body += '<div class="cite-sources"><details open><summary>Sources</summary>';
     results.forEach((chunk, i) => {
       const n = i + 1;
       const path = chunk?.file_path || "?";
+      const startLine = chunk?.start_line ?? 0;
+      const endLine = chunk?.end_line ?? 0;
       const rrfScore = chunk?.score != null ? chunk.score.toFixed(4) : "?";
       const vecScore = chunk?.vector_score != null ? chunk.vector_score.toFixed(4) : null;
       const scoreStr = vecScore != null
         ? `RRF=${rrfScore} · cosine=${vecScore}`
         : `RRF=${rrfScore}`;
       const langClass = inferLanguage(path, chunk?.language);
+      const hasSnippet = (chunk?.code_snippet || "").trim().length > 0;
       const snippet = escapeHtml((chunk?.code_snippet || "").trim());
-      body += `<div id="cite-${n}" class="cite-source-block" data-cite="${n}"><span class="cite-source-label"><span class="cite-source-path">[${n}] ${path}</span><span class="cite-source-score" title="RRF=rank fusion score (higher=better). cosine=vector similarity 0-1.">${scoreStr}</span></span><pre><code class="language-${langClass}">${snippet}</code></pre></div>`;
+      const pathAttr = path && path !== "?" ? ` data-path="${escapeHtml(path)}" data-start-line="${startLine}" data-end-line="${endLine}"` : "";
+      body += `<div id="cite-source-${n}" class="cite-source-block" data-cite="${n}"${pathAttr}><span class="cite-source-label"><span class="cite-source-path">[${n}] ${path}</span><span class="cite-source-score" title="RRF=rank fusion score (higher=better). cosine=vector similarity 0-1.">${scoreStr}</span></span><div class="cite-source-code-container">`;
+      if (hasSnippet) {
+        if (path && path !== "?" && startLine > 1) {
+          body += `<button type="button" class="expand-btn expand-top answer-show-more" data-path="${escapeHtml(path)}" data-start-line="${startLine}" data-end-line="${endLine}" data-direction="up" data-lang="${langClass}" data-cite="${n}" title="Load more lines above">↟</button>`;
+        }
+        body += `<pre><code class="language-${langClass}">${snippet}</code></pre>`;
+        if (path && path !== "?") {
+          body += `<button type="button" class="expand-btn expand-bottom answer-show-more" data-path="${escapeHtml(path)}" data-start-line="${startLine}" data-end-line="${endLine}" data-direction="down" data-lang="${langClass}" data-cite="${n}" title="Load more lines below">↡</button>`;
+        }
+      } else if (path && path !== "?" && startLine && endLine) {
+        body += `<button type="button" class="load-source-btn" data-path="${escapeHtml(path)}" data-start-line="${startLine}" data-end-line="${endLine}" data-lang="${langClass}" data-cite="${n}" title="Fetch and show code">View code</button>`;
+        body += `<pre><code class="language-${langClass}" style="display:none"></code></pre>`;
+      }
+      body += `</div></div>`;
     });
     body += "</details></div>";
   }
@@ -653,49 +816,159 @@ async function runChat(chunksOnly) {
   status.textContent = (Array.isArray(chunksOnly) && chunksOnly.length > 0) ? "Chatting (this chunk only)…" : "Chatting...";
   answerEl.style.display = "none";
   try {
-    const body = Array.isArray(chunksOnly) && chunksOnly.length > 0
-      ? {
-          query,
-          chunks: chunksOnly.map((c) => ({
-            id: c.id ?? "",
-            score: c.score ?? 0,
-            vector_score: c.vector_score ?? null,
-            file_path: c.file_path ?? "",
-            start_line: c.start_line ?? 0,
-            end_line: c.end_line ?? 0,
-            division: c.division ?? null,
-            section_name: c.section_name ?? null,
-            paragraph_name: c.paragraph_name ?? null,
-            code_snippet: c.code_snippet ?? "",
-            language: c.language ?? "COBOL",
-            source_type: c.source_type ?? "code",
-          })),
-        }
-      : { query };
-    const res = await fetch("/query/chat", {
+    if (Array.isArray(chunksOnly) && chunksOnly.length > 0) {
+      const body = {
+        query,
+        chunks: chunksOnly.map((c) => ({
+          id: c.id ?? "",
+          score: c.score ?? 0,
+          vector_score: c.vector_score ?? null,
+          file_path: c.file_path ?? "",
+          start_line: c.start_line ?? 0,
+          end_line: c.end_line ?? 0,
+          division: c.division ?? null,
+          section_name: c.section_name ?? null,
+          paragraph_name: c.paragraph_name ?? null,
+          code_snippet: c.code_snippet ?? "",
+          language: c.language ?? "COBOL",
+          source_type: c.source_type ?? "code",
+        })),
+      };
+      const res = await fetch("/query/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const text = await res.text();
+      let data = {};
+      try { data = text ? JSON.parse(text) : {}; } catch { data = { detail: (text && text.slice(0, 200)) || "Invalid response" }; }
+      if (!res.ok) {
+        const detail = Array.isArray(data.detail) ? data.detail.map((e) => e.msg || JSON.stringify(e)).join("; ") : (data.detail || "Chat failed.");
+        status.textContent = detail;
+        return;
+      }
+      lastQuery = query;
+      lastQueryResults = data.results || [];
+      status.textContent = `Answered. ${(data.results || []).length} chunks used.`;
+      savePromptHistory(query, data.answer, data.results);
+      renderPromptHistory();
+      displayCachedAnswer(data.answer, data.results);
+      return;
+    }
+
+    const folder = getTargetFolderFromQuery(query) || "";
+    const res = await fetch("/api/ask/stream", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
+      body: JSON.stringify({ query, folder }),
     });
-    const text = await res.text();
-    let data = {};
-    try {
-      data = text ? JSON.parse(text) : {};
-    } catch {
-      data = { detail: (text && text.slice(0, 200)) || "Invalid response" };
-    }
     if (!res.ok) {
-      const detail = Array.isArray(data.detail) ? data.detail.map((e) => e.msg || JSON.stringify(e)).join("; ") : (data.detail || "Chat failed.");
+      const text = await res.text();
+      let data = {};
+      try { data = text ? JSON.parse(text) : {}; } catch { data = { detail: (text && text.slice(0, 200)) || "Ask failed." }; }
+      const detail = Array.isArray(data.detail) ? data.detail.map((e) => e.msg || JSON.stringify(e)).join("; ") : (data.detail || "Ask failed.");
       status.textContent = detail;
       return;
     }
     lastQuery = query;
+    answerEl.style.display = "block";
+    answerEl.innerHTML = "";
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    const contentType = (res.headers.get("content-type") || "").toLowerCase();
+    const isSse = contentType.includes("text/event-stream");
+    let buffer = "";
+    let intro = "";
+    let resultData = null;
+    const handleStreamMessage = (eventName, data) => {
+      if (eventName === "intro_chunk") {
+        intro += (typeof data === "string" ? data : String(data || ""));
+        const partial = intro + "\n\n_Loading code and explanation…_";
+        answerEl.innerHTML = formatAnswerWithCode(partial, []);
+        answerEl.querySelectorAll("pre code").forEach(safeHighlightCode);
+      } else if (eventName === "intro_done" || eventName === "intro") {
+        intro = (typeof data === "string" ? data : String(data || intro || ""));
+        const partial = intro + "\n\n_Loading code and explanation…_";
+        answerEl.innerHTML = formatAnswerWithCode(partial, []);
+        answerEl.querySelectorAll("pre code").forEach(safeHighlightCode);
+      } else if (eventName === "result") {
+        resultData = data || {};
+      }
+    };
+    const processSseBlock = (block) => {
+      const clean = (block || "").replace(/\r/g, "");
+      if (!clean.trim()) return;
+      let eventName = "message";
+      const dataLines = [];
+      clean.split("\n").forEach((line) => {
+        if (!line || line.startsWith(":")) return;
+        if (line.startsWith("event:")) {
+          eventName = line.slice(6).trim();
+        } else if (line.startsWith("data:")) {
+          dataLines.push(line.slice(5).trimStart());
+        }
+      });
+      if (!dataLines.length) return;
+      const rawData = dataLines.join("\n");
+      let parsed = rawData;
+      try { parsed = JSON.parse(rawData); } catch (_) {}
+      if (parsed && typeof parsed === "object" && parsed.event != null && parsed.data !== undefined) {
+        handleStreamMessage(parsed.event, parsed.data);
+      } else {
+        handleStreamMessage(eventName, parsed);
+      }
+    };
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      if (isSse) {
+        let sep = buffer.indexOf("\n\n");
+        while (sep !== -1) {
+          const block = buffer.slice(0, sep);
+          buffer = buffer.slice(sep + 2);
+          processSseBlock(block);
+          sep = buffer.indexOf("\n\n");
+        }
+      } else {
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          try {
+            const msg = JSON.parse(line);
+            handleStreamMessage(msg.event, msg.data);
+          } catch (_) {}
+        }
+      }
+    }
+    if (buffer.trim()) {
+      if (isSse) processSseBlock(buffer);
+      else {
+        try {
+          const msg = JSON.parse(buffer);
+          handleStreamMessage(msg.event, msg.data);
+        } catch (_) {}
+      }
+    }
+    const data = resultData || {};
     lastQueryResults = data.results || [];
+    const MAX_CODE_LINES = 25;
+    const truncateCode = (s) => {
+      if (!s || !s.trim()) return s;
+      const lines = s.trim().split("\n");
+      if (lines.length <= MAX_CODE_LINES) return s.trim();
+      return lines.slice(0, MAX_CODE_LINES).join("\n") + "\n\n… (truncated)";
+    };
+    const introPart = intro || data.intro || "";
+    const explanationPart = (data.technical_explanation || "").trim();
+    const codePart = (data.code_snippet && data.code_snippet.trim()) ? ["```c", truncateCode(data.code_snippet), "```"] : [];
+    const answer = [introPart, explanationPart].filter(Boolean).join("\n\n")
+      + (codePart.length ? "\n\nRelevant code:\n\n" + codePart.join("\n") : "");
     status.textContent = `Answered. ${(data.results || []).length} chunks used.`;
-    savePromptHistory(query, data.answer, data.results);
+    savePromptHistory(query, answer, data.results);
     renderPromptHistory();
-    displayCachedAnswer(data.answer, data.results);
-
+    displayCachedAnswer(answer, data.results);
   } catch (err) {
     status.textContent = "Network error: " + (err?.message || "Could not reach server.");
   }
@@ -709,6 +982,22 @@ document.addEventListener("DOMContentLoaded", () => {
   const answerEl = el("chat-answer");
   if (answerEl) answerEl.addEventListener("click", onAnswerClick);
 
+  const queryText = el("query-text");
+  if (queryText) {
+    queryText.addEventListener("input", () => {
+      const query = queryText.value || "";
+      const folder = getTargetFolderFromQuery(query);
+      updateRoutingBadge(folder);
+      schedulePrefetch(query, folder);
+    });
+    queryText.addEventListener("keyup", () => {
+      const query = queryText.value || "";
+      const folder = getTargetFolderFromQuery(query);
+      updateRoutingBadge(folder);
+      schedulePrefetch(query, folder);
+    });
+  }
+
   document.querySelectorAll(".tab-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
       const tab = btn.dataset.tab;
@@ -717,8 +1006,20 @@ document.addEventListener("DOMContentLoaded", () => {
       btn.classList.add("active");
       const panel = document.getElementById(`tab-${tab}`);
       if (panel) panel.classList.add("active");
+      if (tab === "logs") loadLogs();
     });
   });
+
+  const refreshLogsBtn = el("refresh-logs-btn");
+  if (refreshLogsBtn) refreshLogsBtn.addEventListener("click", loadLogs);
+  const logsAutoRefresh = el("logs-auto-refresh");
+  if (logsAutoRefresh) {
+    logsAutoRefresh.addEventListener("change", function () {
+      if (logsRefreshInterval) clearInterval(logsRefreshInterval);
+      logsRefreshInterval = this.checked ? setInterval(loadLogs, 5000) : null;
+    });
+    if (logsAutoRefresh.checked) logsRefreshInterval = setInterval(loadLogs, 5000);
+  }
 });
 
 el("chat-btn").addEventListener("click", () => runChat());

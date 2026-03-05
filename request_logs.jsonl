@@ -1,0 +1,18 @@
+{"type": "ask_stream", "total_ms": 4084.0, "embed_ms": 691.0, "search_ms": 279.0, "llm_ms": 3082.0, "ts": 1772675427.9534395}
+{"type": "ask_stream", "total_ms": 9837.0, "embed_ms": 6704.0, "search_ms": 1164.0, "llm_ms": 1934.0, "ts": 1772675462.830527}
+{"type": "ask_stream", "total_ms": 3847.0, "embed_ms": 698.0, "search_ms": 325.0, "llm_ms": 2181.0, "ts": 1772675689.0537016}
+{"type": "ask_stream", "total_ms": 7011.0, "embed_ms": 4710.0, "search_ms": 281.0, "llm_ms": 1990.0, "ts": 1772675708.4553287}
+{"type": "ask_stream", "total_ms": 2604.0, "embed_ms": 0.0, "search_ms": 590.0, "llm_ms": 1982.0, "ts": 1772675731.111413}
+{"type": "ask_stream", "total_ms": 4098.0, "embed_ms": 743.0, "search_ms": 267.0, "llm_ms": 2393.0, "ts": 1772675853.7022252}
+{"type": "ask_stream", "total_ms": 2335.0, "embed_ms": 0.0, "search_ms": 367.0, "llm_ms": 1938.0, "ts": 1772675862.571192}
+{"type": "ask_stream", "total_ms": 10637.0, "embed_ms": 7345.0, "search_ms": 780.0, "llm_ms": 2486.0, "ts": 1772675891.5739455}
+{"type": "ask_stream", "total_ms": 4602.0, "embed_ms": 696.0, "search_ms": 303.0, "llm_ms": 2893.0, "intro_ms": 2085.0, "extractor_ms": 2891.0, "input_tokens": 915, "output_tokens": 135, "ts": 1772676325.7428846}
+{"type": "ask_stream", "total_ms": 7253.0, "embed_ms": 4525.0, "search_ms": 273.0, "llm_ms": 2422.0, "intro_ms": 1464.0, "extractor_ms": 2420.0, "input_tokens": 424, "output_tokens": 188, "ts": 1772676384.2944334}
+{"type": "ask_stream", "total_ms": 7691.0, "embed_ms": 684.0, "search_ms": 304.0, "rerank_ms": 4634.0, "llm_ms": 2016.0, "intro_ms": 2015.0, "extractor_ms": 1506.0, "input_tokens": 70, "output_tokens": 23, "ts": 1772676544.6366725}
+{"type": "ask_stream", "total_ms": 4945.0, "embed_ms": 4635.0, "search_ms": 279.0, "ts": 1772676582.3310754}
+{"type": "ask_stream", "total_ms": 1794.0, "embed_ms": 720.0, "search_ms": 329.0, "ts": 1772677164.2718544}
+{"type": "ask_stream", "total_ms": 16440.0, "embed_ms": 7756.0, "search_ms": 1037.0, "rerank_ms": 6023.0, "llm_ms": 1567.0, "intro_ms": 21.0, "extractor_ms": 1234.0, "ts": 1772677185.4834356}
+{"type": "ask_stream", "total_ms": 1968.0, "embed_ms": 0.0, "search_ms": 374.0, "rerank_ms": 34.0, "llm_ms": 1515.0, "intro_ms": 168.0, "extractor_ms": 1234.0, "ts": 1772677235.0328016}
+{"type": "ask_stream", "total_ms": 2056.0, "embed_ms": 0.0, "search_ms": 345.0, "rerank_ms": 142.0, "llm_ms": 1524.0, "intro_ms": 147.0, "extractor_ms": 1113.0, "ts": 1772677241.4573922}
+{"type": "ask_stream", "total_ms": 8735.0, "embed_ms": 695.0, "search_ms": 463.0, "rerank_ms": 5181.0, "llm_ms": 2348.0, "intro_ms": 146.0, "extractor_ms": 1965.0, "ts": 1772677524.2932398}
+{"type": "ask_stream", "total_ms": 8365.0, "embed_ms": 686.0, "search_ms": 97.0, "rerank_ms": 5516.0, "llm_ms": 1420.0, "intro_ms": 0.0, "extractor_ms": 1419.0, "ts": 1772679666.6492546}

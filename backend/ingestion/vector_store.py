@@ -4,6 +4,8 @@ Hybrid search: vector + BM25 with RRF fusion, optional reranking.
 """
 import hashlib
 import logging
+import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from pathlib import Path
 from typing import Any
 
@@ -15,7 +17,44 @@ from backend.ingestion.embedder import VECTOR_SIZE
 
 logger = logging.getLogger(__name__)
 
-COLLECTION_NAME = "legacylens-chunks"
+# BM25 singleton cache (avoid loading large pickle on every query)
+_bm25_index_cache: Any = None
+_bm25_index_mtime: float | None = None
+
+
+def _get_bm25_index_cached() -> Any:
+    """
+    Return in-memory BM25 index; reload only when index file mtime changes.
+    """
+    from backend.ingestion.bm25_index import BM25Index
+
+    global _bm25_index_cache, _bm25_index_mtime
+    path = Path(settings.bm25_index_path)
+    if not path.exists():
+        _bm25_index_cache = None
+        _bm25_index_mtime = None
+        return None
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return _bm25_index_cache
+    if _bm25_index_mtime != mtime or _bm25_index_cache is None:
+        _bm25_index_cache = BM25Index.load(path)
+        _bm25_index_mtime = mtime
+        if _bm25_index_cache is not None:
+            logger.info("BM25 index cache refreshed: %d docs", len(_bm25_index_cache.doc_ids))
+    return _bm25_index_cache
+
+
+def warm_bm25_index_cache() -> int:
+    """Warm BM25 cache at startup. Returns number of docs loaded."""
+    bm25 = _get_bm25_index_cached()
+    if bm25 is None:
+        return 0
+    try:
+        return len(bm25.doc_ids)
+    except Exception:
+        return 0
 
 
 def _rrf_fusion(
@@ -128,19 +167,20 @@ def search(
     limit: int = 15,
     score_threshold: float | None = 0.0,
     source_type: str | None = None,
+    folder: str | None = None,
 ) -> list[dict[str, Any]]:
     """Return top-k hits with payloads. Each hit has 'id', 'score', 'payload'."""
     coll = settings.qdrant_collection
-    query_filter = None
+    must: list[Any] = []
     if source_type and source_type != "all":
-        query_filter = qmodels.Filter(
-            must=[
-                qmodels.FieldCondition(
-                    key="source_type",
-                    match=qmodels.MatchValue(value=source_type),
-                )
-            ]
+        must.append(
+            qmodels.FieldCondition(
+                key="source_type",
+                match=qmodels.MatchValue(value=source_type),
+            )
         )
+    # Note: folder filter is applied in hybrid_search in-memory to avoid requiring a payload index
+    query_filter = qmodels.Filter(must=must) if must else None
     response = client.query_points(
         collection_name=coll,
         query=vector,
@@ -170,14 +210,15 @@ def hybrid_search(
     score_threshold: float = 0.0,
     source_type: str | None = None,
     tags_filter: list[str] | None = None,
+    folder: str | None = None,
     use_reranker: bool = False,
+    out_timings: dict[str, float] | None = None,
 ) -> list[dict[str, Any]]:
     """
     Hybrid retrieval: vector + BM25 (if available) with RRF, optional reranking.
     Returns list of hits with 'id', 'score', 'payload'.
     """
-    from backend.ingestion.bm25_index import BM25Index
-
+    t_search_start = time.perf_counter()
     rank_lists: list[list[str]] = []
     id_to_hit: dict[str, dict] = {}
 
@@ -188,7 +229,10 @@ def hybrid_search(
         limit=top_k,
         score_threshold=score_threshold if score_threshold > 0 else 0.0,
         source_type=source_type,
+        folder=folder,
     )
+    if folder and folder.strip():
+        vec_hits = [h for h in vec_hits if (h.get("payload") or {}).get("folder") == folder.strip()]
     vec_ids = [h["id"] for h in vec_hits if h["id"]]
     for h in vec_hits:
         id_to_hit[h["id"]] = dict(h, vector_score=h.get("score"))
@@ -196,14 +240,16 @@ def hybrid_search(
 
     # 2. BM25 search if hybrid enabled
     if settings.use_hybrid_search and query_text.strip():
-        bm25 = BM25Index.load()
+        bm25 = _get_bm25_index_cached()
         if bm25:
-            id_to_payload = {h["id"]: h.get("payload", {}) for h in vec_hits}
+            # When folder filter is set, use index's full payloads so folder is available for all docs
+            id_to_payload = None if folder else {h["id"]: h.get("payload", {}) for h in vec_hits}
             bm25_hits = bm25.search(
                 query_text,
                 limit=top_k,
                 source_type=source_type,
                 tags_filter=tags_filter,
+                folder_filter=folder,
                 id_to_payload=id_to_payload,
             )
             if bm25_hits:
@@ -295,9 +341,47 @@ def hybrid_search(
             settings.qdrant_collection,
         )
 
-    # 6. Optional reranking
-    if use_reranker and settings.use_reranker and ordered and query_text.strip():
-        ordered = _rerank(query_text, ordered)
+    if out_timings is not None:
+        out_timings["search_ms"] = (time.perf_counter() - t_search_start) * 1000
+
+    # 6. Optional reranking (use_reranker from request forces rerank for e.g. /api/prefetch)
+    if use_reranker and ordered and query_text.strip():
+        t0 = time.perf_counter()
+        max_rerank = max(1, getattr(settings, "rerank_max_candidates", 8) or 8)
+        to_rerank = ordered[:max_rerank]
+        rest = ordered[max_rerank:]
+        rerank_gap_skip = max(0.0, float(getattr(settings, "rerank_skip_if_score_gap_ge", 0.0) or 0.0))
+        if rerank_gap_skip > 0.0 and len(to_rerank) >= 2:
+            score_gap = float(to_rerank[0].get("score", 0.0) or 0.0) - float(to_rerank[1].get("score", 0.0) or 0.0)
+            if score_gap >= rerank_gap_skip:
+                reranked = to_rerank
+            else:
+                rerank_timeout_ms = max(0, int(getattr(settings, "rerank_timeout_ms", 0) or 0))
+                if rerank_timeout_ms > 0:
+                    with ThreadPoolExecutor(max_workers=1) as ex:
+                        fut = ex.submit(_rerank, query_text, to_rerank)
+                        try:
+                            reranked = fut.result(timeout=rerank_timeout_ms / 1000.0)
+                        except FuturesTimeoutError:
+                            logger.warning("Rerank timed out at %d ms; using fused order", rerank_timeout_ms)
+                            reranked = to_rerank
+                else:
+                    reranked = _rerank(query_text, to_rerank)
+        else:
+            rerank_timeout_ms = max(0, int(getattr(settings, "rerank_timeout_ms", 0) or 0))
+            if rerank_timeout_ms > 0:
+                with ThreadPoolExecutor(max_workers=1) as ex:
+                    fut = ex.submit(_rerank, query_text, to_rerank)
+                    try:
+                        reranked = fut.result(timeout=rerank_timeout_ms / 1000.0)
+                    except FuturesTimeoutError:
+                        logger.warning("Rerank timed out at %d ms; using fused order", rerank_timeout_ms)
+                        reranked = to_rerank
+            else:
+                reranked = _rerank(query_text, to_rerank)
+        ordered = list(reranked) + rest
+        if out_timings is not None:
+            out_timings["rerank_ms"] = (time.perf_counter() - t0) * 1000
 
     return ordered[:final_k]
 
@@ -499,6 +583,7 @@ def reset_collection(client: QdrantClient, *, dim: int = VECTOR_SIZE) -> None:
     Drop and recreate the configured collection.
     Removes BM25 index so it gets rebuilt on next reingest.
     """
+    global _bm25_index_cache, _bm25_index_mtime
     coll = settings.qdrant_collection
     try:
         client.delete_collection(coll)
@@ -516,6 +601,8 @@ def reset_collection(client: QdrantClient, *, dim: int = VECTOR_SIZE) -> None:
             logger.info("Removed BM25 index %s", bm25_path)
         except OSError:
             pass
+    _bm25_index_cache = None
+    _bm25_index_mtime = None
     logger.info("Reset collection %s with dim=%s", coll, dim)
 
 

@@ -1,99 +1,84 @@
-LegacyLens: RAG for Legacy Codebases
-====================================
+# LegacyLens
 
-## Overview
+RAG over legacy codebases (GnuCOBOL and similar). Ingest source files, chunk with COBOL-aware rules, embed with Vertex AI, store in Qdrant, and query via natural language with cited answers.
 
-LegacyLens is a RAG-powered navigator for large legacy codebases (starting with GnuCOBOL). It ingests source files, chunks them with syntax-aware rules, stores embeddings in a vector database, and exposes a query interface that lets engineers ask natural-language questions and get back grounded answers with file and line-number citations.
+## Features
 
-This project follows the Gauntlet Week 3 "LegacyLens" spec and your Pre-Search document, with a focus on:
+- **Hybrid search** – Vector (Vertex `text-embedding-004`) + BM25 with RRF fusion; optional cross-encoder rerank
+- **COBOL-aware chunking** – Paragraph/section boundaries with fixed-size fallback
+- **Chat** – Ask questions; answers are grounded in retrieved chunks and cite file + line (Vertex Gemini)
+- **Local or Cloud** – Qdrant local (`.qdrant_data`) or Qdrant Cloud; deploy to Google Cloud Run
 
-- **Reliable retrieval** over legacy code (COBOL paragraph-aware chunking)
-- **Hybrid search** (semantic + keyword) using Qdrant
-- **Production-minded architecture** (Cloud Run backend, managed vector DB, secure secrets)
+## Quick start (local)
 
-## High-Level Architecture
+From repo root:
 
-- **Ingestion pipeline (Python)**
-  - Recursively scan the GnuCOBOL repo for `.cob` / `.cbl` files
-  - Normalize and chunk code around COBOL-specific boundaries (e.g., PROCEDURE DIVISION, Area A paragraph endings)
-  - Generate embeddings with `text-embedding-004` (Google)
-  - Upsert dense (and optionally sparse) vectors + rich metadata into Qdrant
+1. **Install**
+   ```bash
+   pip install -e .
+   ```
 
-- **Retrieval & RAG backend (FastAPI)**
-  - Accept natural-language queries
-  - Perform multi-query expansion (GPT-4o-mini) and hybrid search in Qdrant
-  - Merge, deduplicate, and re-rank chunks; enforce a relevance threshold
-  - Stream GPT-4o answers via SSE, always grounded in retrieved code snippets
+2. **Configure**  
+   Copy `.env.example` to `.env` (or create `.env`) and set at least:
+   - `CODE_ROOT` – path to the codebase to ingest (e.g. `gnucobol-3.2_win`)
+   - For **Vertex embeddings/LLM**: `GOOGLE_CLOUD_PROJECT`, `GOOGLE_APPLICATION_CREDENTIALS` (path to service account key)  
+   Without GCP, the app uses pseudo-embeddings and no LLM.
 
-- **Frontend (later)**
-  - Minimal CLI or simple web UI first
-  - Later, a React / Next.js app with:
-    - Query bar
-    - Retrieved snippet list with syntax highlighting
-    - File path + line-number citations
-    - Answer panel with streaming responses
+3. **Ingest**
+   ```bash
+   python -m backend.ingestion.pipeline run --code-root gnucobol-3.2_win
+   ```
+   Uses `CODE_ROOT` from `.env` if you omit `--code-root`.
 
-## Directory Layout
+4. **Run API**
+   ```bash
+   python -m uvicorn backend.api.main:app --reload --host 0.0.0.0 --port 8000
+   ```
 
-Planned high-level structure for this repo:
+5. **Use the app**  
+   - **UI:** http://localhost:8000 (or http://localhost:8000/app)  
+   - **API docs:** http://localhost:8000/docs  
+   - **Health / Vertex status:** http://localhost:8000/status  
 
-- `backend/`
-  - `ingestion/` – scripts and modules for scanning, chunking, embedding, and upserting into Qdrant
-  - `api/` – FastAPI app for query handling, retrieval, and answer generation
-- `frontend/`
-  - Placeholder for CLI or React/Next.js UI (to be bootstrapped with your preferred tool)
-- `docs/`
-  - Pre-search output (copied from your Gauntlet Pre-Search PDF)
-  - RAG architecture doc
-  - Cost analysis and any interview prep notes
+## Deploy to Cloud Run
 
-You can refine this layout as the implementation solidifies (e.g., adding `tests/`, `scripts/`, and deployment artifacts like `Dockerfile`).
+1. Put **Qdrant Cloud** URL and API key (and optionally `CLOUD_RUN_SERVICE_ACCOUNT`) in `.env`.
+2. Run the deploy script (builds image, pushes, deploys):
+   ```powershell
+   .\deploy-cloudrun.ps1
+   ```
+   The script reads `QDRANT_API_KEY`, `ADMIN_TOKEN`, and `MIN_VECTOR_SCORE` from `.env` and passes them to Cloud Run.
 
-## MVP Scope (24-Hour Target)
+**Force a clean image build (if online still has old behavior):**
+```powershell
+$env:NO_CACHE="1"; .\deploy-cloudrun.ps1
+```
 
-Aligned with the Gauntlet MVP checklist:
+See **[docs/DEPLOY.md](docs/DEPLOY.md)** for manual steps, Docker, and troubleshooting.
 
-- **Ingest** at least one legacy codebase (GnuCOBOL)
-- **Chunk** code with syntax-aware splitting (paragraph-level in COBOL, with fallback fixed-size chunks)
-- **Embed** all chunks with `text-embedding-004`
-- **Store** vectors + metadata in Qdrant Cloud
-- **Implement** semantic + keyword (hybrid) search
-- **Expose** a basic query interface (CLI or simple web page)
-- **Return** relevant code snippets with file/line references
-- **Generate** basic answers via GPT-4o using only retrieved context
+## Environment (.env)
 
-## Next Steps
+| Variable | Purpose |
+|----------|---------|
+| `CODE_ROOT` | Path to codebase to ingest |
+| `GOOGLE_CLOUD_PROJECT` | GCP project for Vertex (embeddings + LLM) |
+| `GOOGLE_APPLICATION_CREDENTIALS` | Path to service account JSON (local); not set on Cloud Run |
+| `QDRANT_URL`, `QDRANT_API_KEY` | Qdrant Cloud; leave unset for local `.qdrant_data` |
+| `ADMIN_TOKEN` | Token for admin endpoints (reingest, reset DB) |
+| `LLM_MODEL`, `LLM_ENABLED` | e.g. `gemini-2.0-flash` and `true` for chat |
+| `MIN_VECTOR_SCORE` | Filter chunks by vector score (higher = stricter); deploy script passes this to Cloud Run |
 
-Short-term implementation steps:
+## Calibration and tuning
 
-1. Initialize a Python backend in `backend/` with a `requirements.txt` and a simple FastAPI app.
-2. Implement an ingestion script in `backend/ingestion/` that:
-   - Walks the GnuCOBOL repo
-   - Applies COBOL-aware chunking
-   - Calls `text-embedding-004` in batches and upserts into Qdrant
-3. Implement a query endpoint in `backend/api/` that:
-   - Expands queries with GPT-4o-mini
-   - Runs hybrid search in Qdrant
-   - Assembles context and streams GPT-4o answers
-4. Add a minimal CLI or web UI in `frontend/` that hits the query endpoint.
-5. Copy your full Pre-Search output into `docs/` and start an `ARCHITECTURE.md` that you will keep updated as you iterate.
+- **Retrieval / chat quality** – [docs/CALIBRATION.md](docs/CALIBRATION.md): `MIN_VECTOR_SCORE`, `query_chat_final_k`, reranker, chunking, prompt.
+- **Chat prompt** – Edit `CHAT_SYSTEM_PROMPT` in `backend/api/main.py`; restart to apply.
 
-As you build, keep the Gauntlet Pre-Search checklist, RAG architecture doc, and cost analysis requirements in `docs/` so Cursor can use them as context while you work.
+## Project layout
 
----
-
-## Quick start: functional vector DB
-
-**→ For a direct walkthrough with exact commands, see [docs/SETUP.md](docs/SETUP.md).**
-
-Short version (from repo root):
-
-1. **Install:** `pip install -e .`
-2. **Ingest:** `python -m backend.ingestion.pipeline run --code-root sample_cobol`
-3. **Start API:** `python -m uvicorn backend.api.main:app --reload --host 0.0.0.0 --port 8000`
-4. **Query:** `python scripts/query_cli.py "Where is CALCULATE-INTEREST?"` (or use `http://localhost:8000/app` or `http://localhost:8000/docs`)
-
-Uses pseudo-embeddings by default (no GCP). For real embeddings, set `GOOGLE_CLOUD_PROJECT` and re-run ingestion. Qdrant data lives in `.qdrant_data/`; set `QDRANT_URL` and `QDRANT_API_KEY` for Qdrant Cloud.
-
-**Search the DB:** `GET http://localhost:8000/chunks` to list stored chunks; `POST /query` for semantic search. Both endpoints support source partitioning (`source_type=all|code|docs`) after re-ingestion with current metadata. **Calibration:** see [docs/CALIBRATION.md](docs/CALIBRATION.md) for tuning retrieval and improving quality.
-
+- `backend/api/main.py` – FastAPI app: `/query` (search), `/query/chat` (RAG chat), `/chunks`, `/status`, admin, frontend serve
+- `backend/ingestion/` – Discovery, chunker, embedder (Vertex), vector_store (Qdrant), BM25, pipeline
+- `backend/config.py` – Settings from env (chunk sizes, retrieval knobs, LLM)
+- `frontend/` – HTML + JS assets; `index.html` (local, with Admin), `index.production.html` (minimal for deploy)
+- `docs/DEPLOY.md` – Deployment guide  
+- `docs/CALIBRATION.md` – Tuning retrieval and quality  
+- `deploy-cloudrun.ps1` – Build, push, and deploy to Cloud Run (reads .env)

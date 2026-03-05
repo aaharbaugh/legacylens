@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>LegacyLens Workspace</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/styles/github-dark.min.css" />
-  <link rel="stylesheet" href="/assets/styles.css" />
+  <link rel="stylesheet" href="/assets/styles.css?v=6" />
 </head>
 <body>
   <header class="topbar">
@@ -21,6 +21,7 @@
   <nav class="tabs">
     <button class="tab-btn" data-tab="admin">Admin</button>
     <button class="tab-btn active" data-tab="prompt">Prompt</button>
+    <button class="tab-btn tab-btn-dev" data-tab="logs">Logs (dev)</button>
   </nav>
 
   <main class="layout">
@@ -70,6 +71,41 @@
       </div>
     </section>
 
+    <section id="tab-logs" class="tab-panel">
+      <div class="tab-content">
+        <h2>Request logs</h2>
+        <p class="status muted">Development only — latency breakdown for /query, /query/chat, and /api/ask (stream). Sign in as admin to load.</p>
+        <p class="status muted" style="font-size: 0.85rem; margin-top: 0.25rem;">Embed 0 = prefetch cache hit. Rerank — = off. LLM (ms) = wall‑clock for parallel intro + extractor (slower of the two).</p>
+        <div class="inline buttons" style="margin-bottom: 0.5rem;">
+          <button id="refresh-logs-btn">Refresh logs</button>
+          <label class="inline" style="margin: 0;">
+            <input type="checkbox" id="logs-auto-refresh" checked />
+            <span class="muted">Auto-refresh every 5s</span>
+          </label>
+        </div>
+        <div id="logs-container">
+          <div id="logs-placeholder" class="status muted">No request logs yet. Run a query or chat to see latency breakdown.</div>
+          <table id="logs-table" class="logs-table" style="display: none;">
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Type</th>
+                <th>Total (ms)</th>
+                <th>Embed (ms)</th>
+                <th>Search (ms)</th>
+                <th>Rerank (ms)</th>
+                <th>LLM (ms)</th>
+                <th title="Intro (quick) | Extractor (heavy)">Intro|Extract</th>
+                <th>In (tok)</th>
+                <th>Out (tok)</th>
+              </tr>
+            </thead>
+            <tbody id="logs-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
     <section id="tab-prompt" class="tab-panel active">
       <div class="prompt-layout">
         <aside class="prompt-history-sidebar">
@@ -81,6 +117,9 @@
           <div class="prompt-area">
             <label for="query-text" class="prompt-label">Ask about your codebase</label>
             <textarea id="query-text" rows="4" placeholder="e.g. What does #ifndef __cplusplus do?"></textarea>
+            <div id="routing-badge-container" class="routing-badge-container" aria-live="polite" style="display: none;">
+              <span id="routing-badge" class="badge routing-badge">Targeting: <span id="routing-folder"></span>/</span>
+            </div>
             <div class="prompt-suggestions" aria-label="Tips for better results">
               <span class="prompt-suggestions-label">Better results:</span>
               <button type="button" class="prompt-suggestion-bubble" data-insert="What does [file path or keyword] do? (e.g. file.cbl, EVALUATE)">Include file path or keyword</button>
@@ -99,6 +138,6 @@
 
   <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/highlight.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/highlightjs-cobol@0.3/dist/cobol.min.js"></script>
-  <script src="/assets/app.js"></script>
+  <script src="/assets/app.js?v=6"></script>
 </body>
 </html>

@@ -12,6 +12,9 @@ RUN pip install --no-cache-dir -e .
 COPY frontend/ frontend/
 COPY frontend/index.production.html frontend/index.html
 
+# Copy BM25 index for hybrid search (built locally after ingestion)
+COPY bm25_index.pkl ./
+
 # Verify app imports (PYTHONPATH must include /app for backend)
 RUN PYTHONPATH=/app python -c "from backend.api.main import app; print('Import OK')"
 
