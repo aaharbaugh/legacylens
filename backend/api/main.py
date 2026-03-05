@@ -6,7 +6,7 @@ import logging
 import os
 import sys
 
-# Load .env into os.environ so GOOGLE_APPLICATION_CREDENTIALS and other vars are available to Google libs
+# Load .env into os.environ for OPENAI_API_KEY and other config
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -28,7 +28,7 @@ logging.basicConfig(
 for name in ("backend", "uvicorn.access"):
     logging.getLogger(name).setLevel(logging.INFO)
 # Suppress noisy third-party logs (reranker load report, HuggingFace, httpx, GenAI AFC)
-for name in ("httpx", "httpcore", "sentence_transformers", "transformers", "huggingface_hub", "google_genai.models"):
+for name in ("httpx", "httpcore", "sentence_transformers", "transformers", "huggingface_hub", "openai"):
     logging.getLogger(name).setLevel(logging.ERROR)
 
 import hashlib
@@ -210,21 +210,18 @@ def health() -> dict[str, str]:
 @app.get("/status")
 def status() -> dict[str, Any]:
     """
-    Check whether Vertex is configured and likely in use for embeddings and LLM.
-    - embeddings: "vertex" if GOOGLE_CLOUD_PROJECT is set (and credentials work at runtime), else "pseudo"
-    - credentials_set: true if GOOGLE_APPLICATION_CREDENTIALS is set (local key file)
-    - llm_enabled: true if LLM is configured (model + project)
+    Check whether OpenAI is configured for embeddings and LLM.
+    - embeddings: "openai" if OPENAI_API_KEY is set, else "pseudo"
+    - llm_enabled: true if LLM is configured (model + API key)
     - use_reranker: true if USE_RERANKER env is true (cross-encoder rerank for chat)
     """
-    project = settings.google_cloud_project
-    creds_env = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "").strip()
+    openai_key = (settings.openai_api_key or "").strip()
     app_build = os.environ.get("APP_BUILD", "").strip() or None
     return {
         "status": "ok",
-        "embeddings": "vertex" if project else "pseudo",
-        "google_cloud_project": project or None,
-        "credentials_set": bool(creds_env),
-        "llm_enabled": bool(settings.llm_enabled and settings.llm_model and project),
+        "embeddings": "openai" if openai_key else "pseudo",
+        "openai_configured": bool(openai_key),
+        "llm_enabled": bool(settings.llm_enabled and settings.llm_model and openai_key),
         "llm_model": settings.llm_model if settings.llm_enabled else None,
         "app_build": app_build,
         "min_vector_score": settings.min_vector_score,

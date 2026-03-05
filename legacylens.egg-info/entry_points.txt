@@ -1,2 +1,3 @@
 [console_scripts]
+legacylens-eval = backend.evals.gnucobol_eval:main
 legacylens-ingest = backend.ingestion.pipeline:main

@@ -46,7 +46,7 @@ Use this to check that ingestion did what you expect (paragraph names, line rang
 | **min_vector_score** | Env | Drop chunks with vector cosine below this (default 0.15). | **Higher (0.2–0.25)** = stricter, fewer but more relevant chunks; use when chat answers are vague or pull in junk. **Lower (0.08)** = more chunks; use when you get "no context" or miss good hits. |
 | **use_reranker** | Env | Enable cross-encoder reranking for chat (adds ~5–15s). | Set `USE_RERANKER=false` for ~10s faster; `true` for better quality. |
 | **reranker_model** | Env | Reranker model. | `cross-encoder/ms-marco-MiniLM-L6-v2` (fast default); `BAAI/bge-reranker-base` for quality. |
-| **Embeddings** | Env / ingestion | Pseudo (no GCP) vs real (Vertex `text-embedding-004`). | Use real embeddings for production; set `GOOGLE_CLOUD_PROJECT` and re-run ingestion. |
+| **Embeddings** | Env / ingestion | Pseudo (no API key) vs real (OpenAI `text-embedding-3-small`). | Use real embeddings for production; set `OPENAI_API_KEY` and re-run ingestion. |
 | **Chunking** | `backend/config.py` + `ingestion/chunker.py` | Paragraph vs fixed-size; fallback size/overlap. | If everything is one big chunk per file, tighten paragraph detection or lower `fallback_chunk_lines`. |
 | **Excluded files** | `ingestion/discovery.py` | Build artifacts (.vcxproj, build_windows/, etc.) are excluded. | Re-ingest after changing exclusions. |
 | **Re-ingest** | Pipeline | Re-run after changing chunking, embeddings, or BM25 tokenizer. | After any of these changes, run ingestion again. |
@@ -111,7 +111,7 @@ You can do this manually at first (run a few queries, look at results), then aut
 ## 4. Quick checklist to make it better
 
 1. **Inspect the DB** – `GET /chunks` or `python scripts/inspect_db.py` – confirm chunks look right (files, paragraphs, lines).  
-2. **Use real embeddings** – set `GOOGLE_CLOUD_PROJECT`, re-run ingestion, then query again; compare score distribution.  
+2. **Use real embeddings** – set `OPENAI_API_KEY`, re-run ingestion, then query again; compare score distribution.  
 3. **Enable reranker for chat** – `pip install sentence-transformers`, set `USE_RERANKER=true` in `.env`.  
 4. **Adjust top_k, query_chat_final_k, and score_threshold** – try 5, 10, 15 and 0.0, 0.5, 0.7; see what feels right.  
 5. **Improve chunking** – if chunks are too big or too small, change fallback size/overlap or paragraph rules and re-ingest.  

@@ -9,7 +9,7 @@ Steps to deploy LegacyLens for production use. The app runs as a container (Dock
 ## Prerequisites
 
 - **Docker** installed locally
-- **Google Cloud** account (for Cloud Run + Vertex AI)
+- **Google Cloud** account (for Cloud Run; optional—can use any Docker host)
 - **Qdrant Cloud** account (Cloud Run is stateless; you cannot use local `.qdrant_data`)
 
 ---
@@ -31,8 +31,7 @@ Run ingestion **locally** (or from a VM) so your vectors live in Qdrant Cloud:
 $env:QDRANT_URL = "https://your-cluster.qdrant.io"
 $env:QDRANT_API_KEY = "your-api-key"
 $env:QDRANT_COLLECTION = "legacylens-chunks"
-$env:GOOGLE_CLOUD_PROJECT = "your-gcp-project"
-$env:GOOGLE_APPLICATION_CREDENTIALS = "path\to\your-key.json"
+$env:OPENAI_API_KEY = "sk-..."
 
 python -m backend.ingestion.pipeline run --code-root gnucobol-3.2_win
 ```
@@ -70,7 +69,7 @@ gcloud logging read 'resource.type="cloud_run_revision" resource.labels.service_
 ```
 Test the image locally first:
 ```powershell
-docker run -p 8080:8080 -e QDRANT_URL=... -e QDRANT_API_KEY=... -e GOOGLE_CLOUD_PROJECT=legacylens-489112 -e LLM_ENABLED=true legacylens:latest
+docker run -p 8080:8080 -e QDRANT_URL=... -e QDRANT_API_KEY=... -e OPENAI_API_KEY=sk-... -e LLM_ENABLED=true legacylens:latest
 ```
 
 **If "Image not found" on deploy:** The push may have failed. Run these manually to fix:
@@ -104,8 +103,8 @@ gcloud run deploy legacylens `
   --region us-central1 `
   --platform managed `
   --allow-unauthenticated `
-  --set-env-vars "QDRANT_URL=https://your-cluster.qdrant.io,QDRANT_COLLECTION=legacylens-chunks,GOOGLE_CLOUD_PROJECT=YOUR_PROJECT_ID,LLM_MODEL=gemini-2.0-flash,LLM_ENABLED=true" `
-  --set-secrets "QDRANT_API_KEY=qdrant-api-key:latest,ADMIN_TOKEN=admin-token:latest"
+  --set-env-vars "QDRANT_URL=https://your-cluster.qdrant.io,QDRANT_COLLECTION=legacylens-chunks,LLM_MODEL=gpt-4o-mini,LLM_ENABLED=true" `
+  --set-secrets "QDRANT_API_KEY=qdrant-api-key:latest,ADMIN_TOKEN=admin-token:latest,OPENAI_API_KEY=openai-api-key:latest"
 ```
 
 ### 7. Get the URL
@@ -143,12 +142,10 @@ docker build -t legacylens:latest .
 ```powershell
 docker run -p 8080:8080 `
   -v "$(pwd)/.qdrant_data:/app/.qdrant_data" `
-  -e GOOGLE_CLOUD_PROJECT=your-project `
-  -e GOOGLE_APPLICATION_CREDENTIALS=/app/keys/gcp-key.json `
-  -e LLM_MODEL=gemini-2.0-flash `
+  -e OPENAI_API_KEY=sk-... `
+  -e LLM_MODEL=gpt-4o-mini `
   -e LLM_ENABLED=true `
   -e ADMIN_TOKEN=your-secure-token `
-  -v "$(pwd)/legacylens-gcp-key.json:/app/keys/gcp-key.json:ro" `
   legacylens:latest
 ```
 
@@ -163,12 +160,10 @@ docker run -p 8080:8080 `
 | `QDRANT_URL` | For Cloud Run | Qdrant Cloud cluster URL |
 | `QDRANT_API_KEY` | For Cloud Run | Qdrant Cloud API key |
 | `QDRANT_COLLECTION` | No | Default: `legacylens-chunks` |
-| `GOOGLE_CLOUD_PROJECT` | Yes (for embeddings/LLM) | GCP project ID |
-| `LLM_MODEL` | No | e.g. `gemini-2.0-flash` |
+| `OPENAI_API_KEY` | Yes (for embeddings/LLM) | OpenAI API key (use Secret Manager on Cloud Run) |
+| `LLM_MODEL` | No | e.g. `gpt-4o-mini` |
 | `LLM_ENABLED` | No | `true` to enable chat |
 | `ADMIN_TOKEN` | Recommended | Token for admin endpoints |
-
-For Cloud Run, `GOOGLE_APPLICATION_CREDENTIALS` is not needed—the service account is used automatically.
 
 ---
 

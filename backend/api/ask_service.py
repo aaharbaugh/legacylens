@@ -18,19 +18,6 @@ logger = logging.getLogger(__name__)
 ResolveAskChunksFn = Callable[[str, str | None, dict[str, float] | None], list[RetrievedChunk]]
 
 
-def _usage_from_resp(resp: Any) -> tuple[int | None, int | None]:
-    """Extract (input_tokens, output_tokens) from Gemini generate_content response."""
-    if not resp or not getattr(resp, "usage_metadata", None):
-        return None, None
-    um = resp.usage_metadata
-    inp = getattr(um, "prompt_token_count", None) or getattr(um, "promptTokenCount", None)
-    out = getattr(um, "candidates_token_count", None) or getattr(um, "candidatesTokenCount", None)
-    try:
-        return (int(inp) if inp is not None else None, int(out) if out is not None else None)
-    except (TypeError, ValueError):
-        return None, None
-
-
 async def run_api_ask(req: AskRequest, resolve_ask_chunks: ResolveAskChunksFn) -> AskResponse:
     t_start = time.perf_counter()
     query = (req.query or "").strip()
@@ -63,32 +50,22 @@ async def run_api_ask(req: AskRequest, resolve_ask_chunks: ResolveAskChunksFn) -
     extractor_model = getattr(settings, "llm_extractor_model", None) or settings.llm_model
 
     def _run_intro_sync() -> tuple[str, float, int | None, int | None]:
-        if not settings.google_cloud_project or not intro_model:
+        if not (settings.openai_api_key and settings.openai_api_key.strip()) or not intro_model:
             return "Looking that up.", 0.0, None, None
         t0 = time.perf_counter()
         try:
-            from google import genai
-            from google.genai.types import GenerateContentConfig, HttpOptions
-            client = genai.Client(
-                vertexai=True,
-                project=settings.google_cloud_project,
-                location=settings.google_cloud_location,
-                http_options=HttpOptions(api_version="v1"),
-            )
+            from backend.llm_client import openai_generate
             intro_words = max(10, getattr(settings, "ask_intro_max_words", 15) or 15)
             intro_tokens = max(32, getattr(settings, "ask_intro_max_tokens", 50) or 50)
             prompt = (
                 f"In {intro_words} words or fewer, one short sentence: paraphrase this question or state the user's intent "
                 f"as if you're about to answer it. No code, no context—just the intent.\n\nQuestion: {query}"
             )
-            resp = client.models.generate_content(
-                model=intro_model,
-                contents=prompt,
-                config=GenerateContentConfig(max_output_tokens=intro_tokens, temperature=0.3),
+            text, inp, out = openai_generate(
+                intro_model, prompt, max_tokens=intro_tokens, temperature=0.3
             )
             ms = (time.perf_counter() - t0) * 1000
-            inp, out = _usage_from_resp(resp)
-            return (resp.text or "").strip() or "Looking that up.", ms, inp, out
+            return (text or "Looking that up.").strip() or "Looking that up.", ms, inp, out
         except Exception as e:
             logger.warning("Intro LLM failed: %s", e)
             return "Looking that up.", (time.perf_counter() - t0) * 1000, None, None
@@ -96,18 +73,11 @@ async def run_api_ask(req: AskRequest, resolve_ask_chunks: ResolveAskChunksFn) -
     def _run_extractor_sync() -> tuple[str, str, float, int | None, int | None]:
         default_snippet = chunks[0].code_snippet[:2000] if chunks else ""
         default_expl = "No concise answer could be extracted from the retrieved context."
-        if not settings.google_cloud_project or not extractor_model:
+        if not (settings.openai_api_key and settings.openai_api_key.strip()) or not extractor_model:
             return default_snippet, default_expl, 0.0, None, None
         t0 = time.perf_counter()
         try:
-            from google import genai
-            from google.genai.types import GenerateContentConfig, HttpOptions
-            client = genai.Client(
-                vertexai=True,
-                project=settings.google_cloud_project,
-                location=settings.google_cloud_location,
-                http_options=HttpOptions(api_version="v1"),
-            )
+            from backend.llm_client import openai_generate
             ext_ctx = getattr(settings, "ask_extractor_context_chars", 4000) or 4000
             ext_tokens = max(256, getattr(settings, "ask_extractor_max_tokens", 384) or 384)
             prompt = (
@@ -117,14 +87,11 @@ async def run_api_ask(req: AskRequest, resolve_ask_chunks: ResolveAskChunksFn) -
                 '- "code_snippet": The single most relevant short code excerpt (max 15-20 lines). If none is needed for the answer, use "".\n\n'
                 f"Context:\n{context[:ext_ctx]}\n\nQuestion: {query}\n\nJSON:"
             )
-            resp = client.models.generate_content(
-                model=extractor_model,
-                contents=prompt,
-                config=GenerateContentConfig(max_output_tokens=ext_tokens, temperature=0.2),
+            text, inp, out = openai_generate(
+                extractor_model, prompt, max_tokens=ext_tokens, temperature=0.2
             )
             ms = (time.perf_counter() - t0) * 1000
-            inp, out = _usage_from_resp(resp)
-            text = (resp.text or "").strip()
+            text = (text or "").strip()
             for start in ("```json", "```"):
                 if start in text:
                     text = text.split(start, 1)[-1].replace("```", "").strip()
@@ -200,32 +167,20 @@ async def run_api_ask_stream(req: AskRequest, resolve_ask_chunks: ResolveAskChun
     extractor_model = getattr(settings, "llm_extractor_model", None) or settings.llm_model
 
     def _stream_intro_worker(chunk_queue: queue.Queue) -> None:
-        if not settings.google_cloud_project or not intro_model:
+        if not (settings.openai_api_key and settings.openai_api_key.strip()) or not intro_model:
             chunk_queue.put(None)
             return
         try:
-            from google import genai
-            from google.genai.types import GenerateContentConfig, HttpOptions
-            client = genai.Client(
-                vertexai=True,
-                project=settings.google_cloud_project,
-                location=settings.google_cloud_location,
-                http_options=HttpOptions(api_version="v1"),
-            )
+            from backend.llm_client import openai_generate_stream
             intro_words = max(10, getattr(settings, "ask_intro_max_words", 15) or 15)
             intro_tokens = max(32, getattr(settings, "ask_intro_max_tokens", 50) or 50)
             prompt = (
                 f"In {intro_words} words or fewer, one short sentence: paraphrase this question or state the user's intent "
                 f"as if you're about to answer it. No code, no context—just the intent.\n\nQuestion: {query}"
             )
-            config = GenerateContentConfig(max_output_tokens=intro_tokens, temperature=0.3)
-            stream = client.models.generate_content_stream(
-                model=intro_model,
-                contents=prompt,
-                config=config,
-            )
-            for chunk in stream:
-                text = getattr(chunk, "text", None) or ""
+            for text in openai_generate_stream(
+                intro_model, prompt, max_tokens=intro_tokens, temperature=0.3
+            ):
                 if text:
                     chunk_queue.put(text)
         except Exception as e:
@@ -236,18 +191,11 @@ async def run_api_ask_stream(req: AskRequest, resolve_ask_chunks: ResolveAskChun
     def _run_extractor_sync() -> tuple[str, str, float, int | None, int | None]:
         default_snippet = chunks[0].code_snippet[:2000] if chunks else ""
         default_expl = "No concise answer could be extracted from the retrieved context."
-        if not settings.google_cloud_project or not extractor_model:
+        if not (settings.openai_api_key and settings.openai_api_key.strip()) or not extractor_model:
             return default_snippet, default_expl, 0.0, None, None
         t0 = time.perf_counter()
         try:
-            from google import genai
-            from google.genai.types import GenerateContentConfig, HttpOptions
-            client = genai.Client(
-                vertexai=True,
-                project=settings.google_cloud_project,
-                location=settings.google_cloud_location,
-                http_options=HttpOptions(api_version="v1"),
-            )
+            from backend.llm_client import openai_generate
             ext_ctx = getattr(settings, "ask_extractor_context_chars", 4000) or 4000
             ext_tokens = max(256, getattr(settings, "ask_extractor_max_tokens", 384) or 384)
             prompt = (
@@ -257,14 +205,11 @@ async def run_api_ask_stream(req: AskRequest, resolve_ask_chunks: ResolveAskChun
                 '- "code_snippet": The single most relevant short code excerpt (max 15-20 lines). If none is needed for the answer, use "".\n\n'
                 f"Context:\n{context[:ext_ctx]}\n\nQuestion: {query}\n\nJSON:"
             )
-            resp = client.models.generate_content(
-                model=extractor_model,
-                contents=prompt,
-                config=GenerateContentConfig(max_output_tokens=ext_tokens, temperature=0.2),
+            text, inp, out = openai_generate(
+                extractor_model, prompt, max_tokens=ext_tokens, temperature=0.2
             )
             ms = (time.perf_counter() - t0) * 1000
-            inp, out = _usage_from_resp(resp)
-            text = (resp.text or "").strip()
+            text = (text or "").strip()
             for start in ("```json", "```"):
                 if start in text:
                     text = text.split(start, 1)[-1].replace("```", "").strip()

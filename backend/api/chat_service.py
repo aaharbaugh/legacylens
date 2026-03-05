@@ -25,7 +25,7 @@ def run_query_chat(
     chat_system_prompt: str,
 ) -> ChatResponse:
     """
-    Run hybrid search, build context, and generate answer via Vertex AI (if LLM configured).
+    Run hybrid search, build context, and generate answer via OpenAI (if LLM configured).
     Falls back to a config hint when LLM is not configured.
     """
     t_total = time.perf_counter()
@@ -134,9 +134,7 @@ def run_query_chat(
     context = "\n\n---\n\n".join(_format_chunk(i, r) for i, r in enumerate(results, 1))
     logger.info("Chat context: %d chunks, %d chars", len(results), len(context))
     req_id = str(int(time.time() * 1000))
-    full_prompt = (
-        f"{chat_system_prompt}\n"
-        "---\n\n"
+    user_content = (
         "**Context** (numbered chunks; each has file path, line range, then code):\n\n"
         f"{context or '(No chunks retrieved.)'}\n\n"
         "---\n\n"
@@ -145,40 +143,29 @@ def run_query_chat(
         "**Answer:**"
     )
 
-    if settings.llm_enabled and settings.llm_model and settings.google_cloud_project:
+    if settings.llm_enabled and settings.llm_model and settings.openai_api_key:
         try:
-            from google import genai
-            from google.genai.types import GenerateContentConfig, HttpOptions
+            from backend.llm_client import openai_chat
 
-            client = genai.Client(
-                vertexai=True,
-                project=settings.google_cloud_project,
-                location=settings.google_cloud_location,
-                http_options=HttpOptions(api_version="v1"),
-            )
             t0 = time.perf_counter()
-            resp = client.models.generate_content(
-                model=settings.llm_model,
-                contents=full_prompt,
-                config=GenerateContentConfig(
-                    max_output_tokens=settings.llm_max_output_tokens,
-                    temperature=0.35,
-                ),
+            answer, input_tokens, output_tokens = openai_chat(
+                settings.llm_model,
+                [
+                    {"role": "system", "content": chat_system_prompt},
+                    {"role": "user", "content": user_content},
+                ],
+                max_tokens=settings.llm_max_output_tokens,
+                temperature=0.35,
             )
             llm_ms = (time.perf_counter() - t0) * 1000
-            answer = resp.text if resp and resp.text else "(No response from LLM)"
-            input_tokens = None
-            output_tokens = None
-            if resp and hasattr(resp, "usage_metadata") and resp.usage_metadata:
-                um = resp.usage_metadata
-                input_tokens = getattr(um, "prompt_token_count", None) or getattr(um, "promptTokenCount", None)
-                output_tokens = getattr(um, "candidates_token_count", None) or getattr(um, "candidatesTokenCount", None)
+            if not answer:
+                answer = "(No response from LLM)"
         except Exception as e:
             answer = f"(LLM error: {e})"
             input_tokens = None
             output_tokens = None
     else:
-        answer = "(Enable LLM: set LLM_MODEL and LLM_ENABLED=true with GOOGLE_CLOUD_PROJECT)"
+        answer = "(Enable LLM: set LLM_MODEL and LLM_ENABLED=true with OPENAI_API_KEY)"
         input_tokens = None
         output_tokens = None
 

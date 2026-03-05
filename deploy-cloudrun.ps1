@@ -1,7 +1,7 @@
 # LegacyLens – deploy to Google Cloud Run
-# Run from repo root. Requires: gcloud CLI, Docker, Qdrant Cloud + GCP configured.
+# Run from repo root. Requires: gcloud CLI, Docker, Qdrant Cloud, and OPENAI_API_KEY.
 #
-# Before first deploy: ingest your codebase into Qdrant Cloud (run locally with QDRANT_* in .env):
+# Before first deploy: ingest your codebase into Qdrant Cloud (run locally with QDRANT_* and OPENAI_API_KEY in .env):
 #   python -m backend.ingestion.pipeline run --code-root gnucobol-3.2_win
 
 $ErrorActionPreference = "Stop"
@@ -44,9 +44,9 @@ if ($LASTEXITCODE -ne 0) {
 
 # 6. Deploy to Cloud Run
 Write-Host "`n[6/6] Deploying to Cloud Run..." -ForegroundColor Yellow
-Write-Host "  Set QDRANT_URL, QDRANT_API_KEY, ADMIN_TOKEN via Cloud Run console or --set-env-vars / --set-secrets" -ForegroundColor Gray
+Write-Host "  For production, use Secret Manager for OPENAI_API_KEY instead of --set-env-vars" -ForegroundColor Gray
 
-# Deploy – reads from .env. Optional: set CLOUD_RUN_SERVICE_ACCOUNT=sa@project.iam.gserviceaccount.com (must have Vertex AI User + you need actAs on it)
+# Deploy – reads from .env. Optional: set CLOUD_RUN_SERVICE_ACCOUNT=sa@project.iam.gserviceaccount.com
 $envLines = Get-Content .env -ErrorAction SilentlyContinue
 $serviceAccountLine = ($envLines | Where-Object { $_ -match '^CLOUD_RUN_SERVICE_ACCOUNT=' }) | Select-Object -First 1
 $SERVICE_ACCOUNT = $null
@@ -55,23 +55,23 @@ if ($serviceAccountLine) {
   if (-not $SERVICE_ACCOUNT) { $SERVICE_ACCOUNT = $null }
   else { Write-Host "  Using service account from .env: $SERVICE_ACCOUNT" -ForegroundColor Gray }
 }
-# If no custom SA, Cloud Run uses default (no --service-account) so deploy works; grant default SA "Vertex AI User" in IAM for embeddings/LLM
 
 $qdrantKey = (($envLines | Where-Object { $_ -match '^QDRANT_API_KEY=' }) -replace '^QDRANT_API_KEY=', '') | Select-Object -First 1
 $adminToken = (($envLines | Where-Object { $_ -match '^ADMIN_TOKEN=' }) -replace '^ADMIN_TOKEN=', '') | Select-Object -First 1
+$openaiKey = (($envLines | Where-Object { $_ -match '^OPENAI_API_KEY=' }) -replace '^OPENAI_API_KEY=', '') | Select-Object -First 1
 $minVectorScore = (($envLines | Where-Object { $_ -match '^MIN_VECTOR_SCORE=' }) -replace '^MIN_VECTOR_SCORE=', '') | Select-Object -First 1
 $bm25MinScore = (($envLines | Where-Object { $_ -match '^BM25_MIN_SCORE=' }) -replace '^BM25_MIN_SCORE=', '') | Select-Object -First 1
-$qdrantKey = "$qdrantKey".Trim(); $adminToken = "$adminToken".Trim()
+$qdrantKey = "$qdrantKey".Trim(); $adminToken = "$adminToken".Trim(); $openaiKey = "$openaiKey".Trim()
 $minVectorScore = "$minVectorScore".Trim()
 $bm25MinScore = "$bm25MinScore".Trim()
 if (-not $minVectorScore) { $minVectorScore = "0.15" }
 if (-not $bm25MinScore) { $bm25MinScore = "1e-9" }
-if (-not $qdrantKey -or -not $adminToken) {
-  Write-Host "ERROR: .env must contain QDRANT_API_KEY and ADMIN_TOKEN" -ForegroundColor Red
+if (-not $qdrantKey -or -not $adminToken -or -not $openaiKey) {
+  Write-Host "ERROR: .env must contain QDRANT_API_KEY, ADMIN_TOKEN, and OPENAI_API_KEY" -ForegroundColor Red
   exit 1
 }
 
-$envVars = "QDRANT_URL=https://da99c893-5aa9-4a52-add7-d088a40c4534.us-east4-0.gcp.cloud.qdrant.io,QDRANT_COLLECTION=legacylens-chunks,GOOGLE_CLOUD_PROJECT=$PROJECT_ID,LLM_MODEL=gemini-2.0-flash,LLM_ENABLED=true,QDRANT_API_KEY=$qdrantKey,ADMIN_TOKEN=$adminToken,MIN_VECTOR_SCORE=$minVectorScore,BM25_MIN_SCORE=$bm25MinScore,FALLBACK_CHUNK_LINES=120,FALLBACK_OVERLAP_LINES=0,QUERY_TOP_K=50,QUERY_FINAL_K=25,APP_BUILD=$TAG"
+$envVars = "QDRANT_URL=https://da99c893-5aa9-4a52-add7-d088a40c4534.us-east4-0.gcp.cloud.qdrant.io,QDRANT_COLLECTION=legacylens-chunks,OPENAI_API_KEY=$openaiKey,LLM_MODEL=gpt-4o-mini,LLM_ENABLED=true,QDRANT_API_KEY=$qdrantKey,ADMIN_TOKEN=$adminToken,MIN_VECTOR_SCORE=$minVectorScore,BM25_MIN_SCORE=$bm25MinScore,FALLBACK_CHUNK_LINES=120,FALLBACK_OVERLAP_LINES=0,QUERY_TOP_K=50,QUERY_FINAL_K=25,APP_BUILD=$TAG"
 
 $deployArgs = @(
   "run", "deploy", "legacylens",

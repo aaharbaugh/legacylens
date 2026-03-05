@@ -53,25 +53,20 @@ class FunctionalSummaryGenerator:
         snippet = (payload.get("code_snippet") or "")[: self.max_chars]
         if not snippet.strip():
             return self._heuristic_summary(payload)
+        if not (settings.openai_api_key and settings.openai_api_key.strip()):
+            return self._heuristic_summary(payload)
         try:
-            from google import genai
-            from google.genai.types import HttpOptions
+            from backend.llm_client import openai_generate
         except Exception:
             return self._heuristic_summary(payload)
 
-        if not settings.google_cloud_project:
-            return self._heuristic_summary(payload)
-
-        client = genai.Client(
-            vertexai=True,
-            project=settings.google_cloud_project,
-            location=settings.google_cloud_location,
-            http_options=HttpOptions(api_version="v1"),
-        )
-
         prompt = self._build_prompt(payload, snippet)
-        resp = client.models.generate_content(model=self.model, contents=prompt)
-        text = (getattr(resp, "text", None) or "").strip()
+        text, _, _ = openai_generate(
+            self.model,
+            prompt,
+            max_tokens=256,
+            temperature=0.2,
+        )
         if not text:
             return self._heuristic_summary(payload)
         return self._normalize_summary(text)

@@ -1,7 +1,6 @@
 """
-Embedding generation: Google Gen AI SDK (Vertex AI backend) with batch + cache.
-Fallback: deterministic pseudo-embeddings for local dev without GCP.
-Ingestion uses sequential sub-batches + optional delay to stay under Vertex quota (2 req/s).
+Embedding generation: OpenAI embeddings API with batch + cache.
+Fallback: deterministic pseudo-embeddings when OPENAI_API_KEY is not set.
 """
 import hashlib
 import json
@@ -16,12 +15,12 @@ from backend.config import settings
 logger = logging.getLogger(__name__)
 
 VECTOR_SIZE = 768
-# Only log the first Vertex fallback per process to avoid spamming (e.g. missing ADC every batch)
-_vertex_fallback_logged = False
+# Only log the first OpenAI fallback per process to avoid spamming
+_openai_fallback_logged = False
 
 
 def _pseudo_embed(text: str) -> list[float]:
-    """Deterministic 768-dim vector from text hash. For dev without GCP."""
+    """Deterministic 768-dim vector from text hash. For dev without OpenAI API key."""
     h = hashlib.sha256(text.encode("utf-8")).digest()
     out = []
     for i in range(0, min(768 * 4, len(h) * 4), 4):
@@ -34,7 +33,7 @@ def _pseudo_embed(text: str) -> list[float]:
 
 
 def _estimate_tokens(text: str) -> int:
-    """Rough token count (Vertex-style). Code is ~3–4 chars per token."""
+    """Rough token count. Code is ~3–4 chars per token."""
     return max(1, len(text) // 3)
 
 
@@ -58,85 +57,41 @@ def _split_texts_by_token_limit(texts: list[str], max_tokens: int) -> list[list[
     return batches
 
 
-def _embed_one_batch(
-    sub: list[str],
-    project: str,
-    location: str,
-    model: str,
-    dimensions: int,
-) -> list[list[float]]:
-    """Embed a single sub-batch (used for parallel calls)."""
-    from google import genai
-    from google.genai.types import EmbedContentConfig, HttpOptions
-
-    client = genai.Client(
-        vertexai=True,
-        project=project,
-        location=location,
-        http_options=HttpOptions(api_version="v1"),
-    )
-    config = EmbedContentConfig(output_dimensionality=dimensions)
-    response = client.models.embed_content(
-        model=model,
-        contents=sub,
-        config=config,
-    )
-    out: list[list[float]] = []
-    for emb in response.embeddings:
-        if hasattr(emb, "values"):
-            out.append(list(emb.values))
-        else:
-            out.append(list(emb))
-    return out
+def _embed_one_batch(sub: list[str], model: str, dimensions: int) -> list[list[float]]:
+    """Embed a single sub-batch via OpenAI API."""
+    from backend.llm_client import openai_embed
+    return openai_embed(sub, model=model, dimensions=dimensions)
 
 
-def _get_genai_embeddings(texts: list[str]) -> list[list[float]]:
-    """Call Google Gen AI SDK (Vertex AI backend). Splits by token limit; runs sub-batches with optional throttle to stay under 2 req/s."""
-    project = settings.google_cloud_project
-    if not project:
-        raise ValueError("GOOGLE_CLOUD_PROJECT must be set for Vertex embeddings")
+def _get_openai_embeddings(texts: list[str]) -> list[list[float]]:
+    """Call OpenAI embeddings API. Splits by token limit; runs sub-batches with optional throttle."""
+    if not (settings.openai_api_key and settings.openai_api_key.strip()):
+        raise ValueError("OPENAI_API_KEY must be set for OpenAI embeddings")
     max_tokens = settings.embed_max_tokens_per_request
     sub_batches = _split_texts_by_token_limit(texts, max_tokens)
     delay_sec = getattr(settings, "embed_delay_between_requests_sec", 0.0) or 0.0
     max_workers = max(1, min(getattr(settings, "embed_max_workers", 1), len(sub_batches)))
-    # Sequential (max_workers=1) avoids 4-way burst that causes 429; delay only if still rate-limited
 
     if len(sub_batches) == 1:
         return _embed_one_batch(
             sub_batches[0],
-            project,
-            settings.google_cloud_location,
             settings.embed_model,
             settings.embed_dimensions,
         )
 
-    # Multiple sub-batches: sequential (max_workers=1) or limited parallel + delay to avoid 429
     all_vectors: list[list[float]] = []
     if max_workers <= 1:
         for i, sub in enumerate(sub_batches):
             if delay_sec > 0 and i > 0:
                 time.sleep(delay_sec)
             all_vectors.extend(
-                _embed_one_batch(
-                    sub,
-                    project,
-                    settings.google_cloud_location,
-                    settings.embed_model,
-                    settings.embed_dimensions,
-                )
+                _embed_one_batch(sub, settings.embed_model, settings.embed_dimensions)
             )
         return all_vectors
 
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         futures = {
-            ex.submit(
-                _embed_one_batch,
-                sub,
-                project,
-                settings.google_cloud_location,
-                settings.embed_model,
-                settings.embed_dimensions,
-            ): i
+            ex.submit(_embed_one_batch, sub, settings.embed_model, settings.embed_dimensions): i
             for i, sub in enumerate(sub_batches)
         }
         results = [None] * len(sub_batches)
@@ -151,29 +106,26 @@ def _get_genai_embeddings(texts: list[str]) -> list[list[float]]:
 
 
 class Embedder:
-    """Batch embed with optional file cache. Uses Gen AI SDK (Vertex) when configured, else pseudo-embedding."""
+    """Batch embed with optional file cache. Uses OpenAI when OPENAI_API_KEY is set, else pseudo-embedding."""
 
     def __init__(
         self,
         *,
         cache_path: Path | None = None,
-        use_vertex: bool | None = None,
+        use_openai: bool | None = None,
     ):
         self.cache_path = cache_path or settings.embeddings_cache_path
         self._cache: dict[str, list[float]] = {}
         self._load_cache()
-        self._use_vertex = (
-            use_vertex
-            if use_vertex is not None
-            else bool(settings.google_cloud_project)
+        self._use_openai = (
+            use_openai
+            if use_openai is not None
+            else bool(settings.openai_api_key and settings.openai_api_key.strip())
         )
-        if self._use_vertex:
-            logger.info(
-                "Embeddings: Vertex (project=%s). Set GOOGLE_APPLICATION_CREDENTIALS for local; on Cloud Run ADC is used.",
-                settings.google_cloud_project,
-            )
+        if self._use_openai:
+            logger.info("Embeddings: OpenAI (%s).", settings.embed_model)
         else:
-            logger.info("Embeddings: pseudo (no GOOGLE_CLOUD_PROJECT). Set it in .env for Vertex.")
+            logger.info("Embeddings: pseudo (no OPENAI_API_KEY). Set it in .env for real embeddings.")
 
     def _load_cache(self) -> None:
         if not self.cache_path or not Path(self.cache_path).exists():
@@ -222,19 +174,19 @@ class Embedder:
         if not to_fetch:
             return results
         batch_texts = [texts[i] for i in to_fetch]
-        if self._use_vertex:
+        if self._use_openai:
             try:
-                batch_vectors = _get_genai_embeddings(batch_texts)
+                batch_vectors = _get_openai_embeddings(batch_texts)
             except Exception as e:
-                global _vertex_fallback_logged
-                if not _vertex_fallback_logged:
+                global _openai_fallback_logged
+                if not _openai_fallback_logged:
                     logger.warning(
-                        "Gen AI embedding failed, using pseudo embeddings for this run: %s",
+                        "OpenAI embedding failed, using pseudo embeddings for this run: %s",
                         e,
                     )
-                    _vertex_fallback_logged = True
+                    _openai_fallback_logged = True
                 else:
-                    logger.debug("Gen AI embedding failed (pseudo): %s", e)
+                    logger.debug("OpenAI embedding failed (pseudo): %s", e)
                 batch_vectors = [_pseudo_embed(t) for t in batch_texts]
         else:
             batch_vectors = [_pseudo_embed(t) for t in batch_texts]

@@ -8,8 +8,8 @@ qdrant-client>=1.7.0
 fastapi>=0.109.0
 uvicorn[standard]>=0.27.0
 
-# Google Gen AI SDK (Vertex AI backend: embeddings + LLM)
-google-genai>=1.0.0
+# OpenAI API (embeddings + chat/completions)
+openai>=1.0.0
 
 # BM25 for hybrid search
 rank-bm25>=0.2.2

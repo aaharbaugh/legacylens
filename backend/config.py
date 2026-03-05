@@ -33,16 +33,16 @@ class Settings(BaseSettings):
     qdrant_local_path: Path = Path(".qdrant_data")
     qdrant_collection: str = "legacylens-chunks"
 
-    # Embedding (tuned for Vertex quota: 2 req/s — avoid parallel burst during ingestion)
+    # Embedding (OpenAI text-embedding-3-small supports dimensions; batch for ingestion)
     embed_batch_size: int = 80  # chunks per pipeline batch (higher = fewer batches)
-    embed_max_tokens_per_request: int = 18_000  # Vertex allows 20k; stay under to avoid INVALID_ARGUMENT
-    embed_max_workers: int = 1  # parallel sub-batches (1 = sequential to avoid 429 burst)
-    embed_delay_between_requests_sec: float = 0.0  # set to 0.5 if you still hit 429 (2 req/s); 0 = no extra delay
-    embed_model: str = "text-embedding-004"
+    embed_max_tokens_per_request: int = 18_000  # stay under provider limit per request
+    embed_max_workers: int = 1  # parallel sub-batches (1 = sequential to avoid rate limits)
+    embed_delay_between_requests_sec: float = 0.0  # optional delay between batches
+    embed_model: str = "text-embedding-3-small"
     embed_dimensions: int = 768
-    # Google Cloud (Vertex AI)
-    google_cloud_project: Optional[str] = None
-    google_cloud_location: str = "us-central1"
+    # OpenAI
+    openai_api_key: Optional[str] = None
+    openai_base_url: Optional[str] = None  # optional; for Azure or proxy
 
     # Embedding cache (ingestion)
     embeddings_cache_path: Path = Path("embeddings.json")
@@ -72,7 +72,7 @@ class Settings(BaseSettings):
 
     # Summary-first hierarchical indexing (child summaries -> parent raw code)
     summary_generation_enabled: bool = True
-    summary_model: str = "gemini-1.5-flash"
+    summary_model: str = "gpt-4o-mini"
     summary_max_concurrency: int = 8
     summary_input_max_chars: int = 5000
     summary_timeout_sec: float = 20.0
@@ -80,9 +80,9 @@ class Settings(BaseSettings):
     # BM25 index persistence
     bm25_index_path: Path = Path("bm25_index.pkl")
 
-    # Optional LLM for integrated chat (Vertex AI Gemini). For better answers use "gemini-1.5-pro" or "gemini-2.0-flash".
-    llm_model: Optional[str] = None  # e.g. "gemini-1.5-flash" (fast) or "gemini-1.5-pro" (better quality)
-    llm_enabled: bool = False  # set true when llm_model configured
+    # Optional LLM for integrated chat (OpenAI). e.g. "gpt-4o-mini" (fast) or "gpt-4o" (better quality).
+    llm_model: Optional[str] = None
+    llm_enabled: bool = False  # set true when llm_model and OPENAI_API_KEY configured
     llm_max_output_tokens: int = 2048  # lower = faster responses; 4096 for long answers
 
     # Prefetch + Ask pipeline (Phase 3) — tune for quality vs speed
@@ -97,7 +97,7 @@ class Settings(BaseSettings):
     rerank_timeout_ms: int = 350  # hard timeout for rerank stage; fallback to fused order on timeout
     rerank_skip_if_score_gap_ge: float = 0.02  # skip rerank when top fused score is clearly ahead
     llm_intro_model: Optional[str] = None  # fast model for intro (default: llm_model)
-    llm_extractor_model: Optional[str] = "gemini-1.5-flash"  # fast model for extractor; override with pro for quality
+    llm_extractor_model: Optional[str] = "gpt-4o-mini"  # fast model for extractor; override for quality
     extractor_explanation_max_words: int = 60  # max words for technical_explanation
     ask_intro_context_chars: int = 3000  # intro has no context; kept for compatibility
     ask_intro_max_words: int = 15  # intro must be this many words or fewer

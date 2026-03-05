@@ -11,6 +11,7 @@ from typing import Any
 
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as qmodels
+from qdrant_client.http.exceptions import UnexpectedResponse
 
 from backend.config import settings
 from backend.ingestion.embedder import VECTOR_SIZE
@@ -123,19 +124,53 @@ def get_client() -> QdrantClient:
     )
 
 
+# Payload keys we filter on; require keyword index for Qdrant Cloud
+_FILTER_INDEX_FIELDS = ("chunk_role", "source_type")
+
+
+def _ensure_payload_indexes(client: QdrantClient, coll: str) -> None:
+    """Create keyword payload indexes for filter fields if missing (required by Qdrant Cloud)."""
+    for field in _FILTER_INDEX_FIELDS:
+        try:
+            client.create_payload_index(
+                collection_name=coll,
+                field_name=field,
+                field_schema=qmodels.PayloadSchemaType.KEYWORD,
+            )
+            logger.info("Created payload index for %s on %s", field, coll)
+        except UnexpectedResponse as e:
+            if getattr(e, "status_code", None) == 409 or "already exists" in str(e).lower():
+                logger.debug("Payload index for %s already exists on %s", field, coll)
+            else:
+                raise
+        except Exception as e:
+            if "already exists" in str(e).lower():
+                logger.debug("Payload index for %s already exists on %s", field, coll)
+            else:
+                raise
+
+
 def ensure_collection(client: QdrantClient, dim: int = VECTOR_SIZE) -> None:
-    """Create collection if it doesn't exist; recreate not (preserve data)."""
+    """Create collection if it doesn't exist; ensure filter payload indexes exist."""
     coll = settings.qdrant_collection
     try:
         client.get_collection(coll)
+        _ensure_payload_indexes(client, coll)
         return
     except Exception:
         pass
-    client.create_collection(
-        collection_name=coll,
-        vectors_config=qmodels.VectorParams(size=dim, distance=qmodels.Distance.COSINE),
-    )
-    logger.info("Created collection %s with dim=%s", coll, dim)
+    try:
+        client.create_collection(
+            collection_name=coll,
+            vectors_config=qmodels.VectorParams(size=dim, distance=qmodels.Distance.COSINE),
+        )
+        logger.info("Created collection %s with dim=%s", coll, dim)
+    except UnexpectedResponse as e:
+        if getattr(e, "status_code", None) == 409 or "already exists" in str(e).lower():
+            logger.debug("Collection %s already exists; skipping create", coll)
+        else:
+            raise
+    _ensure_payload_indexes(client, coll)
 
 
 # Max points per upsert request (larger = fewer round-trips; 50 is usually fine for Qdrant Cloud)

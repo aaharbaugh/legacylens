@@ -1,13 +1,13 @@
 # LegacyLens
 
-RAG over legacy codebases (GnuCOBOL and similar). Ingest source files, chunk with COBOL-aware rules, embed with Vertex AI, store in Qdrant, and query via natural language with cited answers.
+RAG over legacy codebases (GnuCOBOL and similar). Ingest source files, chunk with COBOL-aware rules, embed with OpenAI, store in Qdrant, and query via natural language with cited answers.
 
 ## Features
 
-- **Hybrid search** – Vector (Vertex `text-embedding-004`) + BM25 with RRF fusion; optional cross-encoder rerank
+- **Hybrid search** – Vector (OpenAI `text-embedding-3-small`) + BM25 with RRF fusion; optional cross-encoder rerank
 - **COBOL-aware chunking** – Paragraph/section boundaries with fixed-size fallback
-- **Chat** – Ask questions; answers are grounded in retrieved chunks and cite file + line (Vertex Gemini)
-- **Local or Cloud** – Qdrant local (`.qdrant_data`) or Qdrant Cloud; deploy to Google Cloud Run
+- **Chat** – Ask questions; answers are grounded in retrieved chunks and cite file + line (OpenAI)
+- **Local or Cloud** – Qdrant local (`.qdrant_data`) or Qdrant Cloud; deploy to Google Cloud Run or any Docker host
 
 ## Quick start (local)
 
@@ -21,8 +21,8 @@ From repo root:
 2. **Configure**  
    Copy `.env.example` to `.env` (or create `.env`) and set at least:
    - `CODE_ROOT` – path to the codebase to ingest (e.g. `gnucobol-3.2_win`)
-   - For **Vertex embeddings/LLM**: `GOOGLE_CLOUD_PROJECT`, `GOOGLE_APPLICATION_CREDENTIALS` (path to service account key)  
-   Without GCP, the app uses pseudo-embeddings and no LLM.
+   - For **embeddings/LLM**: `OPENAI_API_KEY` (from platform.openai.com)  
+   Without it, the app uses pseudo-embeddings and no LLM.
 
 3. **Ingest**
    ```bash
@@ -38,7 +38,7 @@ From repo root:
 5. **Use the app**  
    - **UI:** http://localhost:8000 (or http://localhost:8000/app)  
    - **API docs:** http://localhost:8000/docs  
-   - **Health / Vertex status:** http://localhost:8000/status  
+   - **Health / status:** http://localhost:8000/status  
 
 ## Deploy to Cloud Run
 
@@ -61,12 +61,11 @@ See **[docs/DEPLOY.md](docs/DEPLOY.md)** for manual steps, Docker, and troublesh
 | Variable | Purpose |
 |----------|---------|
 | `CODE_ROOT` | Path to codebase to ingest |
-| `GOOGLE_CLOUD_PROJECT` | GCP project for Vertex (embeddings + LLM) |
-| `GOOGLE_APPLICATION_CREDENTIALS` | Path to service account JSON (local); not set on Cloud Run |
+| `OPENAI_API_KEY` | OpenAI API key (embeddings + LLM) |
 | `QDRANT_URL`, `QDRANT_API_KEY` | Qdrant Cloud; leave unset for local `.qdrant_data` |
 | `ADMIN_TOKEN` | Token for admin endpoints (reingest, reset DB) |
-| `LLM_MODEL`, `LLM_ENABLED` | e.g. `gemini-2.0-flash` and `true` for chat |
-| `MIN_VECTOR_SCORE` | Filter chunks by vector score (higher = stricter); deploy script passes this to Cloud Run |
+| `LLM_MODEL`, `LLM_ENABLED` | e.g. `gpt-4o-mini` and `true` for chat |
+| `MIN_VECTOR_SCORE` | Filter chunks by vector score (higher = stricter) |
 
 ## Calibration and tuning
 
@@ -76,7 +75,7 @@ See **[docs/DEPLOY.md](docs/DEPLOY.md)** for manual steps, Docker, and troublesh
 ## Project layout
 
 - `backend/api/main.py` – FastAPI app: `/query` (search), `/query/chat` (RAG chat), `/chunks`, `/status`, admin, frontend serve
-- `backend/ingestion/` – Discovery, chunker, embedder (Vertex), vector_store (Qdrant), BM25, pipeline
+- `backend/ingestion/` – Discovery, chunker, embedder (OpenAI), vector_store (Qdrant), BM25, pipeline
 - `backend/config.py` – Settings from env (chunk sizes, retrieval knobs, LLM)
 - `frontend/` – HTML + JS assets; `index.html` (local, with Admin), `index.production.html` (minimal for deploy)
 - `docs/DEPLOY.md` – Deployment guide  
